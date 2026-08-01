@@ -25,6 +25,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaBrowser
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import timber.log.Timber
@@ -40,13 +41,15 @@ import com.doublesymmetry.trackplayer.NativeTrackPlayerSpec
 @ReactModule(name = MusicModule.NAME)
 class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec(reactContext),
     ServiceConnection {
-    private lateinit var browser: MediaBrowser
+     private lateinit var browser: MediaBrowser
     private var playerOptions: Bundle? = null
     private var isServiceBound = false
     private var playerSetUpPromise: Promise? = null
     private val scope = MainScope()
     private lateinit var musicService: MusicService
     private val context = reactContext
+    private val musicEventsReceiver = MusicEvents(context)
+    private var isReceiverRegistered = false
 
     @Nonnull
     override fun getName(): String {
@@ -55,6 +58,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
 
     companion object {
       const val NAME = "TrackPlayer"
+      private const val LOG_TAG = "MusicModule"
     }
 
     override fun addListener(eventType: String) {
@@ -68,18 +72,18 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun initialize() {
+        Timber.tag(LOG_TAG).d("initialize()")
         AppForegroundTracker.start()
     }
 
     override fun onServiceConnected(name: ComponentName, service: IBinder) {
+        Timber.tag(LOG_TAG).d("onServiceConnected() - ${name.className} ${service} ${playerOptions} ${::musicService.isInitialized}")
         launchInScope {
-            // If a binder already exists, don't get a new one
-            if (!::musicService.isInitialized) {
-                val binder: MusicService.MusicBinder = service as MusicService.MusicBinder
-                musicService = binder.service
-                musicService.setupPlayer(playerOptions)
-                playerSetUpPromise?.resolve(null)
-            }
+            val binder: MusicService.MusicBinder = service as MusicService.MusicBinder
+            musicService = binder.service
+            musicService.setupPlayer(playerOptions)
+            playerSetUpPromise?.resolve(null)
+            playerSetUpPromise = null
 
             isServiceBound = true
         }
@@ -89,6 +93,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
      * Called when a connection to the Service has been lost.
      */
     override fun onServiceDisconnected(name: ComponentName) {
+        Timber.tag(LOG_TAG).w("onServiceDisconnected() - ${name.className}")
         launchInScope {
             isServiceBound = false
         }
@@ -99,6 +104,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
      */
     private fun verifyServiceBoundOrReject(promise: Promise): Boolean {
         if (!isServiceBound) {
+            Timber.tag(LOG_TAG).w("Service not bound")
             promise.reject(
                 "player_not_initialized",
                 "The player is not initialized. Call setupPlayer first."
@@ -189,6 +195,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun setupPlayer(data: ReadableMap?, promise: Promise) {
+        Timber.tag(LOG_TAG).d("setupPlayer() ${isServiceBound}")
         if (isServiceBound) {
             promise.reject(
                 "player_already_initialized",
@@ -201,35 +208,62 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
 
         playerSetUpPromise = promise
         playerOptions = bundledData
+        launchInScope {
+            delay(8000)
+            if (!isServiceBound) {
+                Timber.tag(LOG_TAG).w("setupPlayer() - bind timeout")
+                playerSetUpPromise?.reject(
+                    "service_bind_timeout",
+                    "Timed out waiting for MusicService connection."
+                )
+                playerSetUpPromise = null
+            }
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(
-                MusicEvents(context),
+                musicEventsReceiver,
                 IntentFilter(EVENT_INTENT), Context.RECEIVER_NOT_EXPORTED
             )
         } else {
             context.registerReceiver(
-                MusicEvents(context),
+                musicEventsReceiver,
                 IntentFilter(EVENT_INTENT)
             )
         }
+        isReceiverRegistered = true
 
         val musicModule = this
         try {
             Intent(context, MusicService::class.java).also { intent ->
-                context.bindService(intent, musicModule, Context.BIND_AUTO_CREATE)
-                val sessionToken =
-                    SessionToken(context, ComponentName(context, MusicService::class.java))
+                Timber.tag(LOG_TAG).d("setupPlayer.bindService()")
+
+                val bound = context.bindService(intent, musicModule, Context.BIND_AUTO_CREATE)
+                if (!bound) {
+                    Timber.tag(LOG_TAG).w("setupPlayer() - bindService returned false")
+                    playerSetUpPromise?.reject(
+                        "service_bind_failed",
+                        "Could not bind to MusicService."
+                    )
+                    playerSetUpPromise = null
+                    return
+                }
+                val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
                 val browserFuture = MediaBrowser.Builder(context, sessionToken).buildAsync()
+
+                Timber.tag(LOG_TAG).d("setupPlayer.bindService() - bound")
+
                 // browser = browserFuture.get()
             }
         } catch (exception: Exception) {
             Timber.w(exception, "Could not initialize service")
-            throw exception
+            playerSetUpPromise?.reject("service_init_failed", exception)
+            playerSetUpPromise = null
         }
     }
 
     override fun updateOptions(data: ReadableMap?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("updateOptions() ${Arguments.toBundle(data)}")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         val options = Arguments.toBundle(data)
@@ -245,6 +279,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     //   return 1.0
     // }
     override fun add(data: ReadableArray, insertBeforeIndex: Double?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("add() - insertBeforeIndex=$insertBeforeIndex")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         val insertBeforeIndexInt = insertBeforeIndex?.toInt() ?: 0;
@@ -266,9 +301,10 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun load(data: ReadableMap?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("load() ${data}")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         if (data == null) {
-            callback.resolve(null)
+            callback.reject("invalid_track_object", "Track was not a dictionary type")
             return@launchInScope
         }
         val bundle = Arguments.toBundle(data);
@@ -281,19 +317,25 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun move(fromIndex: Double, toIndex: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("move() - from=$fromIndex to=$toIndex")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         musicService.move(fromIndex.toInt(), toIndex.toInt())
         callback.resolve(null)
     }
 
     override fun remove(data: ReadableArray?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("remove()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         val inputIndexes = Arguments.toList(data)
         if (inputIndexes != null) {
             val size = musicService.tracks.size
             val indexes: ArrayList<Int> = ArrayList();
             for (inputIndex in inputIndexes) {
-                val index = if (inputIndex is Int) inputIndex else inputIndex.toString().toInt()
+                val index = when (inputIndex) {
+                    is Int -> inputIndex
+                    is Double -> inputIndex.toInt()
+                    else -> inputIndex.toString().toInt()
+                }
                 if (index < 0 || index >= size) {
                     callback.reject(
                         "index_out_of_bounds",
@@ -309,6 +351,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun updateMetadataForTrack(index: Double, map: ReadableMap?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("updateMetadataForTrack() - index=$index")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         if (index < 0 || index >= musicService.tracks.size) {
@@ -324,6 +367,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun updateNowPlayingMetadata(map: ReadableMap?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("updateNowPlayingMetadata()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         if (musicService.tracks.isEmpty()) {
@@ -339,6 +383,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun removeUpcomingTracks(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("removeUpcomingTracks()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.removeUpcomingTracks()
@@ -346,6 +391,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun skip(index: Double, initialTime: Double?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("skip() - index=$index initialTime=$initialTime")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.skip(index.toInt())
@@ -358,6 +404,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun skipToNext(initialTime: Double?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("skipToNext() - initialTime=$initialTime")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.skipToNext()
@@ -370,6 +417,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun skipToPrevious(initialTime: Double?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("skipToPrevious() - initialTime=$initialTime")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.skipToPrevious()
@@ -382,6 +430,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun reset(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("reset()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.stop()
@@ -392,6 +441,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun play(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("play()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.play()
@@ -399,6 +449,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun pause(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("pause()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.pause()
@@ -406,6 +457,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun stop(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("stop()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.stop()
@@ -413,6 +465,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun seekTo(seconds: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("seekTo() - seconds=$seconds")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.seekTo(seconds.toFloat())
@@ -420,6 +473,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun seekBy(offset: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("seekBy() - offset=$offset")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.seekBy(offset.toFloat())
@@ -427,6 +481,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun retry(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("retry()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.retry()
@@ -434,6 +489,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun setVolume(volume: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("setVolume() - volume=$volume")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.setVolume(volume.toFloat())
@@ -441,12 +497,14 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getVolume(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getVolume()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         callback.resolve(musicService.getVolume())
     }
 
     override fun setRate(rate: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("setRate() - rate=$rate")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.setRate(rate.toFloat())
@@ -454,12 +512,14 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getRate(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getRate()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         callback.resolve(musicService.getRate())
     }
 
     override fun setRepeatMode(mode: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("setRepeatMode() - mode=$mode")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.setRepeatMode(RepeatMode.fromOrdinal(mode.toInt()))
@@ -467,12 +527,14 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getRepeatMode(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getRepeatMode()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         callback.resolve(musicService.getRepeatMode().ordinal)
     }
 
     override fun setPlayWhenReady(playWhenReady: Boolean, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("setPlayWhenReady() - $playWhenReady")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         musicService.playWhenReady = playWhenReady
@@ -480,12 +542,14 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getPlayWhenReady(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getPlayWhenReady()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         callback.resolve(musicService.playWhenReady)
     }
 
     override fun getTrack(index: Double, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getTrack() - index=$index")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         val indexInt = index.toInt()
@@ -497,12 +561,14 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getQueue(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getQueue()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         callback.resolve(Arguments.fromList(musicService.tracks.map { it.originalItem }))
     }
 
     override fun setQueue(data: ReadableArray?, callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("setQueue()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 
         try {
@@ -515,6 +581,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getActiveTrackIndex(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getActiveTrackIndex()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         callback.resolve(
             if (musicService.tracks.isEmpty()) null else musicService.getCurrentTrackIndex()
@@ -522,6 +589,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getActiveTrack(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getActiveTrack()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         callback.resolve(
             musicService.currentTrack?.let {
@@ -531,6 +599,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getProgress(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getProgress()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         val bundle = Bundle()
         bundle.putDouble("duration", musicService.getDurationInSeconds());
@@ -540,25 +609,51 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
     }
 
     override fun getPlaybackState(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("getPlaybackState()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         callback.resolve(Arguments.fromBundle(musicService.getPlayerStateBundle(musicService.state)))
     }
 
     override fun acquireWakeLock(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("acquireWakeLock()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         musicService.acquireWakeLock()
         callback.resolve(null)
     }
 
     override fun abandonWakeLock(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("abandonWakeLock()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         musicService.abandonWakeLock()
         callback.resolve(null)
     }
 
     override fun validateOnStartCommandIntent(callback: Promise) = launchInScope {
+        Timber.tag(LOG_TAG).d("validateOnStartCommandIntent()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
         callback.resolve(musicService.onStartCommandIntentValid)
+    }
+
+    override fun invalidate() {
+        Timber.tag(LOG_TAG).d("invalidate()")
+        if (isReceiverRegistered) {
+            try {
+                context.unregisterReceiver(musicEventsReceiver)
+            } catch (_: Exception) {
+                // ignore
+            }
+            isReceiverRegistered = false
+        }
+        if (isServiceBound) {
+            try {
+                context.unbindService(this)
+            } catch (_: Exception) {
+                // ignore
+            }
+            isServiceBound = false
+        }
+        scope.cancel()
+        super.invalidate()
     }
 
     // Bridgeless interop layer tries to pass the `Job` from `scope.launch` to the JS side

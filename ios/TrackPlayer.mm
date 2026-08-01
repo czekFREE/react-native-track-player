@@ -202,5 +202,8 @@ RCT_EXPORT_MODULE()
 - (void)acquireWakeLock:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
   resolve(nil);
 }
+- (void)setAndroidAutoBrowseItems:(nonnull NSArray *)items emptyMessage:(nonnull NSString *)emptyMessage resolve:(nonnull RCTPromiseResolveBlock)resolve reject:(nonnull RCTPromiseRejectBlock)reject {
+  resolve(nil);
+}
 
 @end

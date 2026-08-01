@@ -64,7 +64,8 @@ class MusicService : MediaLibraryService() {
             }
         }
         mediaLibrarySession = MediaLibrarySession.Builder(this, player.exoPlayer, callback)
-        .setCustomLayout(customCommandButtons)
+        .setId("${packageName}.kotlinaudio.music-service")
+            .setCustomLayout(customCommandButtons)
             .build()
     }
 

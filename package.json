@@ -207,7 +207,7 @@
     },
     "ios": {
       "modulesProvider": {
-        "NativeTrackPlayer": "TrackPlayer"
+        "TrackPlayer": "TrackPlayer"
       }
     }
   },

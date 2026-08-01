@@ -9,11 +9,16 @@ import com.doublesymmetry.kotlinaudio.models.*
 import java.util.*
 import kotlin.math.max
 import kotlin.math.min
+import timber.log.Timber
 
 class QueuedAudioPlayer(
     private val context: Context,
     options: PlayerOptions = PlayerOptions()
 ) : AudioPlayer(context, options) {
+
+    companion object {
+      private const val LOG_TAG = "QueuedAudioPlayer"
+    }
 
     private val queue = LinkedList<MediaItem>()
 
@@ -34,7 +39,7 @@ class QueuedAudioPlayer(
         }
 
     val currentIndex
-        get() = exoPlayer.currentMediaItemIndex
+        get() = exoPlayer.getCurrentMediaItemIndex()
 
     var shuffleMode
         get() = exoPlayer.shuffleModeEnabled
@@ -43,7 +48,7 @@ class QueuedAudioPlayer(
         }
 
     override val currentItem: AudioItem?
-        get() = queue.getOrNull(currentIndex)?.let { AudioItem.fromMediaItem(it) }
+        get() = exoPlayer.getCurrentMediaItem()?.let { AudioItem.fromMediaItem(it) }
 
     val nextIndex: Int?
         get() {
@@ -88,11 +93,18 @@ class QueuedAudioPlayer(
     }
 
     override fun load(item: AudioItem) {
+        Timber.tag(LOG_TAG).d("load() - queue.isEmpty: ${queue.isEmpty()}, currentIndex: ${currentIndex} ${exoPlayer.getCurrentWindowIndex()} ${exoPlayer.getCurrentPeriodIndex()} ${exoPlayer.getCurrentTracks()}")
+
         if (queue.isEmpty()) {
             add(item)
         } else {
-            exoPlayer.addMediaItem(currentIndex + 1, item.toMediaItem())
-            exoPlayer.removeMediaItem(currentIndex)
+            val mediaSource = item.toMediaItem()
+
+            exoPlayer.setMediaItem(mediaSource)
+
+            queue.clear()
+            queue.add(mediaSource)
+
             exoPlayer.seekTo(currentIndex, C.TIME_UNSET)
             exoPlayer.prepare()
         }

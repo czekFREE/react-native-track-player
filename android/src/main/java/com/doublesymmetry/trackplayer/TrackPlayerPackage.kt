@@ -7,9 +7,16 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.module.model.ReactModuleInfo
 import com.facebook.react.module.model.ReactModuleInfoProvider
 import java.util.HashMap
+import timber.log.Timber
 
 class TrackPlayerPackage : BaseReactPackage() {
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? {
+      Timber.plant(object : Timber.DebugTree() {
+          override fun createStackElementTag(element: StackTraceElement): String? {
+              return "RNTP-${element.className}:${element.methodName}"
+          }
+      })
+
     return if (name == MusicModule.NAME) {
       MusicModule(reactContext)
     } else {

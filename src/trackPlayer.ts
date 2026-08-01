@@ -79,6 +79,10 @@ export function addEventListener<T extends Event>(
   return emitter.addListener(event, listener);
 }
 
+export function removeAllEventListeners(eventType: string) {
+  return emitter.removeAllListeners(eventType);
+}
+
 // MARK: - Queue API
 
 /**

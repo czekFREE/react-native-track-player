@@ -9,7 +9,9 @@ import { SetupNotCalledError } from './TrackPlayer/SetupNotCalledError';
 
 export class TrackPlayerModule extends PlaylistPlayer implements Spec {
   protected emitter = DeviceEventEmitter;
-  protected progressUpdateEventInterval: NodeJS.Timeout | undefined;
+  protected progressUpdateEventInterval:
+    | ReturnType<typeof setInterval>
+    | undefined;
 
   public getConstants() {
     return {

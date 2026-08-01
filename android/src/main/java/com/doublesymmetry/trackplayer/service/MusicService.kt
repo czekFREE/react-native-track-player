@@ -20,9 +20,12 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.CacheBitmapLoader
 import androidx.media3.session.LibraryResult
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Rating
 import androidx.media3.common.util.BitmapLoader
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaLibraryService.LibraryParams
+import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
@@ -58,16 +61,19 @@ import kotlin.system.exitProcess
 @OptIn(UnstableApi::class)
 @MainThread
 class MusicService : HeadlessJsMediaService() {
-    private lateinit var player: QueuedAudioPlayer
+     private lateinit var player: QueuedAudioPlayer
     private val binder = MusicBinder()
     private val scope = MainScope()
     private lateinit var fakePlayer: ExoPlayer
     private lateinit var mediaSession: MediaLibrarySession
+    private var mediaSessionReleased = false
     private var progressUpdateJob: Job? = null
     private var sessionCommands: SessionCommands? = null
     private var playerCommands: Player.Commands? = null
     private var customLayout: List<CommandButton> = listOf()
     private var lastWake: Long = 0
+
+
     var onStartCommandIntentValid: Boolean = true
 
     fun acquireWakeLock() {
@@ -92,11 +98,8 @@ class MusicService : HeadlessJsMediaService() {
 
     @ExperimentalCoroutinesApi
     override fun onCreate() {
-        Timber.plant(object : Timber.DebugTree() {
-            override fun createStackElementTag(element: StackTraceElement): String? {
-                return "RNTP-${element.className}:${element.methodName}"
-            }
-        })
+        Timber.tag(LOG_TAG).d("onCreate()")
+
         fakePlayer = ExoPlayer.Builder(this).build()
         val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -107,6 +110,7 @@ class MusicService : HeadlessJsMediaService() {
         mediaSession = MediaLibrarySession.Builder(this, fakePlayer,
             InnerMediaSessionCallback()
         )
+            .setId("${packageName}.trackplayer.music-service")
             .setBitmapLoader(CacheBitmapLoader(CoilBitmapLoader(this)))
             // https://github.com/androidx/media/issues/1218
             .setSessionActivity(
@@ -118,7 +122,11 @@ class MusicService : HeadlessJsMediaService() {
                 )
             )
             .build()
+        mediaSessionReleased = false
         super.onCreate()
+
+        Timber.tag(LOG_TAG).d("onCreate() - done")
+
     }
 
     enum class AppKilledPlaybackBehavior(val string: String) {
@@ -165,7 +173,24 @@ class MusicService : HeadlessJsMediaService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         onStartCommandIntentValid = intent != null
-        Timber.d("onStartCommand: ${intent?.action}, ${intent?.`package`}")
+
+        // Timber.tag(LOG_TAG).d("onStartCommand(): ${intent?.action}, ${intent?.`package`} ${commandStarted} ${flags} ${startId}")
+        Timber.tag(LOG_TAG).d(
+            "onStartCommand() action=%s component=%s data=%s flags=%d startId=%d extras=%s",
+            intent?.action,
+            intent?.component,
+            intent?.data,
+            flags,
+            startId,
+            intent?.extras
+        )
+
+        if (mediaSessionReleased) {
+            Timber.tag(LOG_TAG).w("onStartCommand() - mediaSession already released, stopping self")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             // HACK: this is not supposed to be here. I definitely screwed up. but Why?
             onMediaKeyEvent(intent)
@@ -173,18 +198,28 @@ class MusicService : HeadlessJsMediaService() {
         // HACK: Why is onPlay triggering onStartCommand??
         if (!commandStarted) {
             commandStarted = true
-            super.onStartCommand(intent, flags, startId)
         }
+        super.onStartCommand(intent, flags, startId)
         return START_STICKY
+    }
+
+    private fun releaseMediaSession() {
+        if (!this::mediaSession.isInitialized || mediaSessionReleased) {
+            return
+        }
+
+        mediaSessionReleased = true
+        mediaSession.release()
     }
 
     @MainThread
     fun setupPlayer(playerOptions: Bundle?) {
+        Timber.tag(LOG_TAG).d("setupPlayer() ${this::player.isInitialized} ${playerOptions}")
+
         if (this::player.isInitialized) {
-            print("Player was initialized previously. Preventing reinitialization.")
+            Timber.tag(LOG_TAG).d("setupPlayer() - Player was initialized previously. Preventing reinitialization")
             return
         }
-        Timber.d("Setting up player")
         val options = PlayerOptions(
             alwaysShowNext = playerOptions?.getBoolean(ALWAYS_SHOW_NEXT, true) ?: true,
             audioContentType = when (playerOptions?.getString(ANDROID_AUDIO_CONTENT_TYPE)) {
@@ -210,7 +245,9 @@ class MusicService : HeadlessJsMediaService() {
         )
         player = QueuedAudioPlayer(this@MusicService, options)
         fakePlayer.release()
-        mediaSession.player = player.forwardingPlayer
+        // mediaSession.player = player.forwardingPlayer
+        mediaSession.setPlayer(player.forwardingPlayer)
+
         observeEvents()
     }
 
@@ -255,10 +292,10 @@ class MusicService : HeadlessJsMediaService() {
             }
         }
         val capabilities =
-            options.getIntegerArrayList("capabilities")?.map { Capability.entries[it] }
+            options.getIntegerArrayList("capabilities")?.mapNotNull { Capability.entries.getOrNull(it) }
                 ?: emptyList()
         var notificationCapabilities = options.getIntegerArrayList("notificationCapabilities")
-            ?.map { Capability.entries[it] } ?: emptyList()
+            ?.mapNotNull { Capability.entries.getOrNull(it) } ?: emptyList()
         if (notificationCapabilities.isEmpty()) notificationCapabilities = capabilities
 
         val playerCommandsBuilder = Player.Commands.Builder().addAll(
@@ -674,7 +711,9 @@ class MusicService : HeadlessJsMediaService() {
     @SuppressLint("VisibleForTests")
     @MainThread
     fun emit(event: String, data: Bundle? = null) {
-        reactContext?.emitDeviceEvent(event, data?.let { Arguments.fromBundle(it) })
+        val args = data?.let { Arguments.fromBundle(it) }
+        Timber.tag(LOG_TAG).d("emit() $event - args=$args")
+        reactContext?.emitDeviceEvent(event, args)
     }
 
     @SuppressLint("VisibleForTests")
@@ -693,7 +732,14 @@ class MusicService : HeadlessJsMediaService() {
     @MainThread
     override fun onBind(intent: Intent?): IBinder? {
         val intentAction = intent?.action
-        Timber.d("intentAction = $intentAction")
+        Timber.tag(LOG_TAG).d("onBind() - intentAction = $intentAction")
+
+        if (mediaSessionReleased) {
+            Timber.tag(LOG_TAG).w("onBind() - mediaSession already released, rejecting bind")
+            stopSelf()
+            return null
+        }
+
         return if (intentAction != null) {
             super.onBind(intent)
         } else {
@@ -703,7 +749,7 @@ class MusicService : HeadlessJsMediaService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         val intentAction = intent?.action
-        Timber.d("intentAction = $intentAction")
+        Timber.tag(LOG_TAG).d("onUnbind() - intentAction = $intentAction")
         return super.onUnbind(intent)
     }
 
@@ -715,20 +761,23 @@ class MusicService : HeadlessJsMediaService() {
     @MainThread
     override fun onTaskRemoved(rootIntent: Intent?) {
         onUnbind(rootIntent)
-        Timber.d("isInitialized = ${::player.isInitialized}, appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+        Timber.tag(LOG_TAG).d("onTaskRemoved() - isInitialized = ${::player.isInitialized}, appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
         if (!::player.isInitialized) {
-            mediaSession.release()
+            releaseMediaSession()
             return
         }
 
         when (appKilledPlaybackBehavior) {
             AppKilledPlaybackBehavior.PAUSE_PLAYBACK -> {
-                Timber.d("Pausing playback - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+                Timber.tag(LOG_TAG).d("onTaskRemoved() - Pausing playback - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
                 player.pause()
             }
             AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION -> {
-                Timber.d("Killing service - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
-                mediaSession.release()
+                Timber.tag(LOG_TAG).d("onTaskRemoved() - Killing service - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+
+                // emit("destroy")
+
+                releaseMediaSession()
                 player.clear()
                 player.stop()
                 // HACK: the service first stops, then starts, then call onTaskRemove. Why system
@@ -744,6 +793,8 @@ class MusicService : HeadlessJsMediaService() {
                 onDestroy()
                 // https://github.com/androidx/media/issues/27#issuecomment-1456042326
                 stopSelf()
+
+
                 exitProcess(0)
             }
 
@@ -764,8 +815,8 @@ class MusicService : HeadlessJsMediaService() {
                 return false
             }
             lastWake = currentTime
-            val activityIntent = packageManager.getLaunchIntentForPackage(packageName)
-            activityIntent!!.data = Uri.parse("trackplayer://service-bound")
+            val activityIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
+            activityIntent.data = Uri.parse("trackplayer://service-bound")
             activityIntent.action = Intent.ACTION_VIEW
             activityIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             var activityOptions = ActivityOptions.makeBasic()
@@ -781,24 +832,30 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession {
-        Timber.d("${controllerInfo.packageName}")
+        Timber.tag(LOG_TAG).d("onGetSession() - ${controllerInfo.packageName}")
         return mediaSession
     }
 
     @MainThread
     override fun onHeadlessJsTaskFinish(taskId: Int) {
+        super.onHeadlessJsTaskFinish(taskId);
         // This is empty so ReactNative doesn't kill this service
     }
 
     @MainThread
     override fun onDestroy() {
+        Timber.tag(LOG_TAG).d("onDestroy() ${::player.isInitialized}")
+        runCatching {
+            releaseMediaSession()
+        }.onFailure { throwable ->
+            Timber.tag(LOG_TAG).w(throwable, "onDestroy() - mediaSession.release() failed")
+        }
         if (::player.isInitialized) {
-            Timber.d("Releasing media session and destroying player")
-            mediaSession.release()
             player.destroy()
         }
 
         progressUpdateJob?.cancel()
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -808,6 +865,8 @@ class MusicService : HeadlessJsMediaService() {
         } else {
             intent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
         }
+
+        Timber.tag(LOG_TAG).d("onMediaKeyEvent() ${keyEvent}")
 
         if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
             return when (keyEvent.keyCode) {
@@ -866,10 +925,64 @@ class MusicService : HeadlessJsMediaService() {
         // HACK: I'm sure most of the callbacks were not implemented correctly.
         // ATM I only care that andorid auto still functions.
 
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            controller: MediaSession.ControllerInfo,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onGetLibraryRoot() - ${controller.packageName}")
+
+            return Futures.immediateFuture(
+                LibraryResult.ofItem(createAndroidAutoRootItem(), params)
+            )
+        }
+
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            controller: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onGetChildren() - ${controller.packageName}, parentId=$parentId, page=$page, pageSize=$pageSize")
+
+            if (parentId != ANDROID_AUTO_ROOT_ID) {
+                return Futures.immediateFuture(
+                    LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE, params)
+                )
+            }
+
+            return Futures.immediateFuture(
+                LibraryResult.ofItemList(listOf(createAndroidAutoHelloWorldItem()), params)
+            )
+        }
+
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            controller: MediaSession.ControllerInfo,
+            mediaId: String
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onGetItem() - ${controller.packageName}, mediaId=$mediaId")
+
+            val item = when (mediaId) {
+                ANDROID_AUTO_ROOT_ID -> createAndroidAutoRootItem()
+                ANDROID_AUTO_HELLO_WORLD_ID -> createAndroidAutoHelloWorldItem()
+                else -> null
+            }
+
+            return Futures.immediateFuture(
+                item?.let { LibraryResult.ofItem(it, null) }
+                    ?: LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE)
+            )
+        }
+
         override fun onDisconnected(
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ) {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onDisconnected() - ${controller.packageName}")
+
             emit(MusicEvents.CONNECTOR_DISCONNECTED, Bundle().apply {
                 putString("package", controller.packageName)
             })
@@ -882,7 +995,7 @@ class MusicService : HeadlessJsMediaService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
-            Timber.d("${controller.packageName}")
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onConnect() - ${controller.packageName}")
             val isMediaNotificationController = session.isMediaNotificationController(controller)
             val isAutomotiveController = session.isAutomotiveController(controller)
             val isAutoCompanionController = session.isAutoCompanionController(controller)
@@ -902,6 +1015,8 @@ class MusicService : HeadlessJsMediaService() {
             ) {
                 // HACK: attempt to wake up activity (for legacy APM). if not, start headless.
                 if (!selfWake(controller.packageName)) {
+                    Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onConnect.onStartCommand(): ${controller.packageName}")
+
                     onStartCommand(null, 0, 0)
                 }
             }
@@ -931,6 +1046,8 @@ class MusicService : HeadlessJsMediaService() {
             command: SessionCommand,
             args: Bundle
         ): ListenableFuture<SessionResult> {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onCustomCommand() - ${controller} ${command} ${args}")
+
             player.forwardingPlayer.let {
                 when (command.customAction) {
                     CustomCommandButton.JUMP_BACKWARD.customAction -> { it.seekBack() }
@@ -948,6 +1065,8 @@ class MusicService : HeadlessJsMediaService() {
             controllerInfo: MediaSession.ControllerInfo,
             intent: Intent
         ): Boolean {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onMediaButtonEvent() - ${controllerInfo}")
+
             return onMediaKeyEvent(intent) ?: super.onMediaButtonEvent(
                 session,
                 controllerInfo,
@@ -959,6 +1078,8 @@ class MusicService : HeadlessJsMediaService() {
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onPlaybackResumption() - ${controller}")
+
             emit(MusicEvents.PLAYBACK_RESUME, Bundle().apply {
                 putString("package", controller.packageName)
             })
@@ -970,6 +1091,8 @@ class MusicService : HeadlessJsMediaService() {
             controller: MediaSession.ControllerInfo,
             rating: Rating
         ): ListenableFuture<SessionResult> {
+            Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onSetRating() - ${controller}")
+
             Bundle().apply {
                 setRating(this, "rating", rating)
                 emit(MusicEvents.BUTTON_SET_RATING, this)
@@ -983,6 +1106,9 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     companion object {
+        private const val LOG_TAG = "MusicService"
+        private const val ANDROID_AUTO_ROOT_ID = "youradio_android_auto_root"
+        private const val ANDROID_AUTO_HELLO_WORLD_ID = "youradio_android_auto_hello_world"
         const val EMPTY_NOTIFICATION_ID = 1
         const val STATE_KEY = "state"
         const val ERROR_KEY = "error"
@@ -1029,5 +1155,35 @@ class MusicService : HeadlessJsMediaService() {
 
         const val DEFAULT_JUMP_INTERVAL = 15.0
         const val DEFAULT_STOP_FOREGROUND_GRACE_PERIOD = 5
+
+        private fun createAndroidAutoRootItem(): MediaItem {
+            return MediaItem.Builder()
+                .setMediaId(ANDROID_AUTO_ROOT_ID)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle("Youradio")
+                        .setSubtitle("Android Auto")
+                        .setIsBrowsable(true)
+                        .setIsPlayable(false)
+                        .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+                        .build()
+                )
+                .build()
+        }
+
+        private fun createAndroidAutoHelloWorldItem(): MediaItem {
+            return MediaItem.Builder()
+                .setMediaId(ANDROID_AUTO_HELLO_WORLD_ID)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle("Hello world")
+                        .setSubtitle("Android Auto browse tree is connected")
+                        .setIsBrowsable(false)
+                        .setIsPlayable(true)
+                        .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                        .build()
+                )
+                .build()
+        }
     }
 }

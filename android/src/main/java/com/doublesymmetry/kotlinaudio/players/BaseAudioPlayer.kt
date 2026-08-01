@@ -44,6 +44,9 @@ abstract class BaseAudioPlayer internal constructor(
     private val context: Context,
     val options: PlayerOptions = PlayerOptions()
 ) {
+    companion object {
+      private const val LOG_TAG = "BaseAudioPlayer"
+    }
 
     val exoPlayer: ExoPlayer
     val forwardingPlayer: InnerForwardingPlayer
@@ -156,6 +159,8 @@ abstract class BaseAudioPlayer internal constructor(
     }
 
     init {
+        Timber.tag(LOG_TAG).d("init() - ${options}")
+
         if (options.cacheSizeKb > 0) {
             cache = Cache.initCache(context, options.cacheSizeKb)
         }
@@ -200,7 +205,13 @@ abstract class BaseAudioPlayer internal constructor(
      * @param item The [AudioItem] to replace the current one.
      */
     open fun load(item: AudioItem) {
+        Timber.tag(LOG_TAG).d("load()")
+
         exoPlayer.addMediaItem(item.toMediaItem())
+
+        // exoPlayer.setMediaItem(item.toMediaItem())
+        // exoPlayer.replaceMediaItem(0, item.toMediaItem())
+
         exoPlayer.prepare()
     }
 
@@ -219,6 +230,8 @@ abstract class BaseAudioPlayer internal constructor(
         }
 
     fun play() {
+        Timber.tag(LOG_TAG).d("play()")
+
         exoPlayer.play()
         if (currentItem != null) {
             exoPlayer.prepare()
@@ -475,6 +488,8 @@ abstract class BaseAudioPlayer internal constructor(
         }
 
         override fun play() {
+            Timber.tag(LOG_TAG).d("InnerForwardingPlayer.play()")
+
             playerEventHolder.updateOnPlayerActionTriggeredExternally(MediaSessionCallback.PLAY)
         }
 
@@ -511,6 +526,8 @@ abstract class BaseAudioPlayer internal constructor(
         }
 
         override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
+            Timber.tag(LOG_TAG).d("InnerForwardingPlayer.seekTo() ${mediaItemIndex} ${positionMs}")
+
             playerEventHolder.updateOnPlayerActionTriggeredExternally(
                 MediaSessionCallback.SEEK(
                     positionMs
@@ -519,6 +536,8 @@ abstract class BaseAudioPlayer internal constructor(
         }
 
         override fun seekTo(positionMs: Long) {
+            Timber.tag(LOG_TAG).d("InnerForwardingPlayer.seekTo() ${positionMs}")
+
             playerEventHolder.updateOnPlayerActionTriggeredExternally(
                 MediaSessionCallback.SEEK(
                     positionMs

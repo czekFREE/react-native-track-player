@@ -50,6 +50,9 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
 
     // MARK: - RCTEventEmitter
     private func emit(event: EventType, body: Any? = nil) {
+        if event.rawValue.hasPrefix("remote-") {
+            NSLog("[CarPlay][Remote][Native] emit \(event.rawValue) body=\(String(describing: body))")
+        }
         delegate?.sendEvent(name: event.rawValue, body: body)
     }
 
@@ -151,61 +154,118 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
 
         // setup event listeners
         player.remoteCommandController.handleChangePlaybackPositionCommand = { [weak self] event in
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] changePlaybackPosition ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
             if let event = event as? MPChangePlaybackPositionCommandEvent {
-                self?.emit(event: EventType.RemoteSeek, body: ["position": event.positionTime])
+                NSLog("[CarPlay][Remote][Native] changePlaybackPosition position=\(event.positionTime)")
+                self.emit(event: EventType.RemoteSeek, body: ["position": event.positionTime])
                 return MPRemoteCommandHandlerStatus.success
             }
 
+            NSLog("[CarPlay][Remote][Native] changePlaybackPosition failed event=\(event)")
             return MPRemoteCommandHandlerStatus.commandFailed
         }
 
         player.remoteCommandController.handleNextTrackCommand = { [weak self] _ in
-            self?.emit(event: EventType.RemoteNext)
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] nextTrack ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
+            NSLog("[CarPlay][Remote][Native] nextTrack")
+            self.emit(event: EventType.RemoteNext)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handlePauseCommand = { [weak self] _ in
-            self?.emit(event: EventType.RemotePause)
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] pause ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
+            NSLog("[CarPlay][Remote][Native] pause")
+            self.emit(event: EventType.RemotePause)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handlePlayCommand = { [weak self] _ in
-            self?.emit(event: EventType.RemotePlay)
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] play ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
+            NSLog("[CarPlay][Remote][Native] play")
+            self.emit(event: EventType.RemotePlay)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handlePreviousTrackCommand = { [weak self] _ in
-            self?.emit(event: EventType.RemotePrevious)
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] previousTrack ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
+            NSLog("[CarPlay][Remote][Native] previousTrack")
+            self.emit(event: EventType.RemotePrevious)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handleSkipBackwardCommand = { [weak self] event in
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] skipBackward ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
             if let command = event.command as? MPSkipIntervalCommand,
                let interval = command.preferredIntervals.first {
-                self?.emit(event: EventType.RemoteJumpBackward, body: ["interval": interval])
+                NSLog("[CarPlay][Remote][Native] skipBackward interval=\(interval)")
+                self.emit(event: EventType.RemoteJumpBackward, body: ["interval": interval])
                 return MPRemoteCommandHandlerStatus.success
             }
 
+            NSLog("[CarPlay][Remote][Native] skipBackward failed event=\(event)")
             return MPRemoteCommandHandlerStatus.commandFailed
         }
 
         player.remoteCommandController.handleSkipForwardCommand = { [weak self] event in
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] skipForward ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
             if let command = event.command as? MPSkipIntervalCommand,
                let interval = command.preferredIntervals.first {
-                self?.emit(event: EventType.RemoteJumpForward, body: ["interval": interval])
+                NSLog("[CarPlay][Remote][Native] skipForward interval=\(interval)")
+                self.emit(event: EventType.RemoteJumpForward, body: ["interval": interval])
                 return MPRemoteCommandHandlerStatus.success
             }
 
+            NSLog("[CarPlay][Remote][Native] skipForward failed event=\(event)")
             return MPRemoteCommandHandlerStatus.commandFailed
         }
 
         player.remoteCommandController.handleStopCommand = { [weak self] _ in
-            self?.emit(event: EventType.RemoteStop)
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] stop ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
+            NSLog("[CarPlay][Remote][Native] stop")
+            self.emit(event: EventType.RemoteStop)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handleTogglePlayPauseCommand = { [weak self] _ in
-            self?.emit(event: self?.player.playerState == .paused
+            guard let self = self, self.player.currentItem != nil else {
+                NSLog("[CarPlay][Remote][Native] togglePlayPause ignored, no current track")
+                return MPRemoteCommandHandlerStatus.noSuchContent
+            }
+
+            NSLog("[CarPlay][Remote][Native] togglePlayPause playerState=\(self.player.playerState)")
+            self.emit(event: self.player.playerState == .paused
                 ? EventType.RemotePlay
                 : EventType.RemotePause
             )
@@ -214,16 +274,19 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         }
 
         player.remoteCommandController.handleLikeCommand = { [weak self] _ in
+            NSLog("[CarPlay][Remote][Native] like")
             self?.emit(event: EventType.RemoteLike)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handleDislikeCommand = { [weak self] _ in
+            NSLog("[CarPlay][Remote][Native] dislike")
             self?.emit(event: EventType.RemoteDislike)
             return MPRemoteCommandHandlerStatus.success
         }
 
         player.remoteCommandController.handleBookmarkCommand = { [weak self] _ in
+            NSLog("[CarPlay][Remote][Native] bookmark")
             self?.emit(event: EventType.RemoteBookmark)
             return MPRemoteCommandHandlerStatus.success
         }
@@ -282,6 +345,9 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
                     bookmarkOptions: options["bookmarkOptions"] as? [String: Any]
                 )
             }
+
+        player.syncRemoteCommandsWithCommandCenter()
+        NSLog("[CarPlay][Remote][Native] updateOptions capabilities=\(capabilitiesStr) remoteCommands=\(player.remoteCommands.count)")
 
         configureProgressUpdateEvent(
             interval: ((options["progressUpdateEventInterval"] as? NSNumber) ?? 0).doubleValue
@@ -344,6 +410,11 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         }
 
         player.load(item: track)
+        if player.automaticallyUpdateNowPlayingInfo {
+            player.nowPlayingInfoController.set(
+                keyValue: MediaItemProperty.duration(track.duration)
+            )
+        }
         resolve(player.currentIndex)
     }
 
@@ -715,6 +786,20 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     // MARK: - QueuedAudioPlayer Event Handlers
 
     func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
+        if player.automaticallyUpdateNowPlayingInfo {
+            switch state {
+            case .playing:
+                MPNowPlayingInfoCenter.default().playbackState = .playing
+            case .buffering, .loading:
+                MPNowPlayingInfoCenter.default().playbackState =
+                    player.playWhenReady ? .playing : .paused
+            case .paused, .ready:
+                MPNowPlayingInfoCenter.default().playbackState = .paused
+            case .ended, .failed, .idle, .stopped:
+                MPNowPlayingInfoCenter.default().playbackState = .stopped
+            }
+        }
+
         emit(event: EventType.PlaybackState, body: getPlaybackStateBodyKeyValues(state: state))
         if (state == .ended) {
             emit(event: EventType.PlaybackQueueEnded, body: [

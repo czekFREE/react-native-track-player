@@ -5,7 +5,16 @@ import { SetupNotCalledError } from './SetupNotCalledError';
 export class Player {
   protected hasInitialized = false;
   protected element?: HTMLMediaElement;
-  protected player?: shaka.Player;
+  protected player?: {
+    attach: (element: HTMLMediaElement) => Promise<void>;
+    addEventListener: (
+      type: string,
+      listener: (event: unknown) => void
+    ) => void;
+    load: (url: string) => Promise<void>;
+    retryStreaming: () => void;
+    unload: () => Promise<void>;
+  };
   protected _current?: Track = undefined;
   protected _playWhenReady = false;
   protected _state: PlaybackState = { state: State.None };
