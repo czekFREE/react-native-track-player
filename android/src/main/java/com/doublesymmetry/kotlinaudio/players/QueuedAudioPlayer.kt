@@ -9,7 +9,7 @@ import com.doublesymmetry.kotlinaudio.models.*
 import java.util.*
 import kotlin.math.max
 import kotlin.math.min
-import timber.log.Timber
+import com.doublesymmetry.trackplayer.DevelopmentLogger as Timber
 
 class QueuedAudioPlayer(
     private val context: Context,

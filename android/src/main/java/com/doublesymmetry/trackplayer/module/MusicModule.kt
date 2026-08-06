@@ -28,7 +28,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import timber.log.Timber
+import com.doublesymmetry.trackplayer.DevelopmentLogger as Timber
 import java.util.*
 import javax.annotation.Nonnull
 

@@ -36,7 +36,7 @@ import com.doublesymmetry.kotlinaudio.players.components.Cache
 import com.doublesymmetry.kotlinaudio.players.components.MediaFactory
 import com.doublesymmetry.kotlinaudio.players.components.setupBuffer
 import kotlinx.coroutines.MainScope
-import timber.log.Timber
+import com.doublesymmetry.trackplayer.DevelopmentLogger as Timber
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 

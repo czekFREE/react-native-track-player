@@ -11,11 +11,13 @@ import timber.log.Timber
 
 class TrackPlayerPackage : BaseReactPackage() {
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? {
+    if (BuildConfig.DEBUG) {
       Timber.plant(object : Timber.DebugTree() {
           override fun createStackElementTag(element: StackTraceElement): String? {
               return "RNTP-${element.className}:${element.methodName}"
           }
       })
+    }
 
     return if (name == MusicModule.NAME) {
       MusicModule(reactContext)

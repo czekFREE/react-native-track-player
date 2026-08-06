@@ -47,7 +47,9 @@ export class PlaylistPlayer extends Player {
   }
 
   protected onPlaylistEnded() {
-    console.warn('`onPlaylistEnded` is currently unimplemented');
+    if (__DEV__) {
+      console.warn('`onPlaylistEnded` is currently unimplemented');
+    }
   }
 
   protected get currentIndex() {
@@ -207,10 +209,14 @@ export class PlaylistPlayer extends Player {
 
   // TODO
   public updateMetadataForTrack(_index: number, _metadata: Partial<Track>) {
-    console.warn('`updateMetadataForTrack` is currently unimplemented');
+    if (__DEV__) {
+      console.warn('`updateMetadataForTrack` is currently unimplemented');
+    }
   }
 
   public updateNowPlayingMetadata(_metadata: Partial<Track>) {
-    console.warn('`updateNowPlayingMetadata` is currently unimplemented');
+    if (__DEV__) {
+      console.warn('`updateNowPlayingMetadata` is currently unimplemented');
+    }
   }
 }

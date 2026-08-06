@@ -134,8 +134,9 @@ export class Player {
       },
     };
 
-    // Log the error.
-    console.debug('Error code', error.code, 'object', error);
+    if (__DEV__) {
+      console.debug('Error code', error.code, 'object', error);
+    }
   }
 
   /**
@@ -162,7 +163,11 @@ export class Player {
     if (!this.element) throw new SetupNotCalledError();
     this.playWhenReady = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return this.element.play().catch((err: any) => console.error(err));
+    return this.element.play().catch((err: any) => {
+      if (__DEV__) {
+        console.error(err);
+      }
+    });
   }
 
   public pause() {

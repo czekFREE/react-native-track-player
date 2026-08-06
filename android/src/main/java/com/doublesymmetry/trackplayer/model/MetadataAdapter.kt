@@ -12,7 +12,7 @@ import androidx.media3.extractor.metadata.id3.ChapterFrame
 import androidx.media3.extractor.metadata.id3.TextInformationFrame
 import androidx.media3.extractor.metadata.id3.UrlLinkFrame
 import androidx.media3.container.MdtaMetadataEntry
-import timber.log.Timber
+import com.doublesymmetry.trackplayer.DevelopmentLogger as Timber
 
 sealed class MetadataAdapter {
     companion object {

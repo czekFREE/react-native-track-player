@@ -52,24 +52,42 @@
    public static @Nullable PowerManager.WakeLock sWakeLock;
    private static final String TAG = "HeadlessJsMediaService";
 
+   private static void logDebug(String message) {
+     if (BuildConfig.DEBUG) {
+       Log.d(TAG, message);
+     }
+   }
+
+   private static void logWarning(String message) {
+     if (BuildConfig.DEBUG) {
+       Log.w(TAG, message);
+     }
+   }
+
+   private static void logWarning(String message, Throwable throwable) {
+     if (BuildConfig.DEBUG) {
+       Log.w(TAG, message, throwable);
+     }
+   }
+
    private boolean initialized = false;
 
    @Override
    public int onStartCommand(Intent intent, int flags, int startId) {
        super.onStartCommand(intent, flags, startId);
-       Log.d(TAG, "onStartCommand: flags=" + flags + ", startId=" + startId + ", intent=" + intent);
+       logDebug("onStartCommand: flags=" + flags + ", startId=" + startId + ", intent=" + intent);
        HeadlessJsTaskConfig taskConfig = getTaskConfig(intent);
        if (!initialized && taskConfig != null) {
            // HACK: ensure headlessJsMediaService tasks are only registered once.
            initialized = true;
-           Log.d(TAG, "Starting headless task: " + taskConfig.getTaskKey());
+           logDebug("Starting headless task: " + taskConfig.getTaskKey());
            startTask(taskConfig);
            return START_REDELIVER_INTENT;
        }
       if (taskConfig == null) {
-          Log.w(TAG, "No task config for intent; service will not start task.");
+          logWarning("No task config for intent; service will not start task.");
       } else if (initialized) {
-          Log.w(TAG, "Task already initialized; ignoring new task config.");
+          logWarning("Task already initialized; ignoring new task config.");
       }
        return START_NOT_STICKY;
    }
@@ -98,7 +116,7 @@
                PowerManager.PARTIAL_WAKE_LOCK, HeadlessJsMediaService.class.getCanonicalName());
        sWakeLock.setReferenceCounted(false);
        sWakeLock.acquire();
-       Log.d(TAG, "WakeLock acquired");
+       logDebug("WakeLock acquired");
      }
    }
  
@@ -110,7 +128,7 @@
      @Override
      public void onCreate() {
         super.onCreate();
-       Log.d(TAG, "onCreate");
+       logDebug("onCreate");
      }
 
      /**
@@ -123,13 +141,13 @@
    protected void startTask(final HeadlessJsTaskConfig taskConfig) {
      UiThreadUtil.assertOnUiThread();
      // acquireWakeLockNow(this);
-    Log.d(TAG, "startTask: " + taskConfig.getTaskKey());
+    logDebug("startTask: " + taskConfig.getTaskKey());
        ReactContext reactContext = getReactContext();
        if (reactContext == null) {
-          Log.d(TAG, "ReactContext not ready; creating and scheduling task.");
+          logDebug("ReactContext not ready; creating and scheduling task.");
            createReactContextAndScheduleTask(taskConfig);
      } else {
-      Log.d(TAG, "ReactContext ready; invoking task.");
+      logDebug("ReactContext ready; invoking task.");
        invokeStartTask(reactContext, taskConfig);
      }
    }
@@ -143,14 +161,14 @@
              () -> {
                int taskId = headlessJsTaskContext.startTask(taskConfig);
                mActiveTasks.add(taskId);
-              Log.d(TAG, "Task started: id=" + taskId + ", key=" + taskConfig.getTaskKey());
+              logDebug("Task started: id=" + taskId + ", key=" + taskConfig.getTaskKey());
              });
    }
  
    @Override
    public void onDestroy() {
      super.onDestroy();
-     Log.d(TAG, "onDestroy" + mActiveTasks);
+     logDebug("onDestroy" + mActiveTasks);
 
      ReactContext reactContext = getReactContext();
      if (reactContext != null) {
@@ -162,23 +180,23 @@
        try {
          if (sWakeLock.isHeld()) {
            sWakeLock.release();
-           Log.d(TAG, "WakeLock released");
+           logDebug("WakeLock released");
          }
        } catch (RuntimeException exception) {
-         Log.w(TAG, "WakeLock release failed", exception);
+         logWarning("WakeLock release failed", exception);
        }
      }
    }
 
    @Override
    public void onHeadlessJsTaskStart(int taskId) {
-     Log.d(TAG, "onHeadlessJsTaskStart: id=" + taskId);
+     logDebug("onHeadlessJsTaskStart: id=" + taskId);
    }
  
    @Override
    public void onHeadlessJsTaskFinish(int taskId) {
      mActiveTasks.remove(taskId);
-     Log.d(TAG, "onHeadlessJsTaskFinish: id=" + taskId + ", remaining=" + mActiveTasks.size());
+     logDebug("onHeadlessJsTaskFinish: id=" + taskId + ", remaining=" + mActiveTasks.size());
      if (mActiveTasks.isEmpty()) {
        stopSelf();
      }
@@ -222,13 +240,13 @@
     private void createReactContextAndScheduleTask(final HeadlessJsTaskConfig taskConfig) {
 
         if (DefaultNewArchitectureEntryPoint.getBridgelessEnabled()) { // new arch
-            Log.d(TAG, "Creating ReactContext (new arch)");
+            logDebug("Creating ReactContext (new arch)");
             final ReactHost reactHost = getReactHost();
             reactHost.addReactInstanceEventListener(
                     new ReactInstanceEventListener() {
                         @Override
                         public void onReactContextInitialized(@NonNull ReactContext reactContext) {
-                            Log.d(TAG, "ReactContext initialized (new arch)");
+                            logDebug("ReactContext initialized (new arch)");
                             invokeStartTask(reactContext, taskConfig);
                             reactHost.removeReactInstanceEventListener(this);
                         }
@@ -236,7 +254,7 @@
             );
             reactHost.start();
         } else { // old arch
-            Log.d(TAG, "Creating ReactContext (old arch)");
+            logDebug("Creating ReactContext (old arch)");
             final ReactInstanceManager reactInstanceManager =
                     getReactNativeHost().getReactInstanceManager();
 
@@ -244,7 +262,7 @@
                     new ReactInstanceEventListener() {
                         @Override
                         public void onReactContextInitialized(@NonNull ReactContext reactContext) {
-                            Log.d(TAG, "ReactContext initialized (old arch)");
+                            logDebug("ReactContext initialized (old arch)");
                             invokeStartTask(reactContext, taskConfig);
                             reactInstanceManager.removeReactInstanceEventListener(this);
                         }

@@ -54,7 +54,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flow
-import timber.log.Timber
+import com.doublesymmetry.trackplayer.DevelopmentLogger as Timber
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
