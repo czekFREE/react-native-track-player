@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   schedule:
     #  run job at 00:00:00 UTC
-    - cron:  '0 0 * * *'
+    - cron: '0 0 * * *'
 
 jobs:
   nightly_build:
@@ -14,7 +14,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v2
         with:
-          node-version: 22.x
+          node-version: 24.15.0
       - name: Install dependencies
         run: yarn install --immutable
       - name: Build Library
