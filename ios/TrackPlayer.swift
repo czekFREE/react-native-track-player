@@ -752,39 +752,10 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         resolve(NSNull())
     }
 
-    private func getPlaybackStateErrorKeyValues() -> Dictionary<String, Any> {
-        switch player.playbackError {
-            case .failedToLoadKeyValue: return [
-                "message": "Failed to load resource",
-                "code": "ios_failed_to_load_resource"
-            ]
-            case .invalidSourceUrl: return [
-                "message": "The source url was invalid",
-                "code": "ios_invalid_source_url"
-            ]
-            case .notConnectedToInternet: return [
-                "message": "A network resource was requested, but an internet connection has not been established and can’t be established automatically.",
-                "code": "ios_not_connected_to_internet"
-            ]
-            case .playbackFailed: return [
-                "message": "Playback of the track failed",
-                "code": "ios_playback_failed"
-            ]
-            case .itemWasUnplayable: return [
-                "message": "The track could not be played",
-                "code": "ios_track_unplayable"
-            ]
-            default: return [
-                "message": "A playback error occurred",
-                "code": "ios_playback_error"
-            ]
-        }
-    }
-
     private func getPlaybackStateBodyKeyValues(state: AudioPlayerState) -> Dictionary<String, Any> {
         var body: Dictionary<String, Any> = ["state": State.fromPlayerState(state: state).rawValue]
         if (state == AudioPlayerState.failed) {
-            body["error"] = getPlaybackStateErrorKeyValues()
+            body["error"] = getPlaybackErrorKeyValues(error: player.playbackError)
         }
         return body
     }
@@ -831,7 +802,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     }
 
     func handleAudioPlayerFailed(error: Error?) {
-        emit(event: EventType.PlaybackError, body: ["error": error?.localizedDescription])
+        emit(event: EventType.PlaybackError, body: getPlaybackErrorKeyValues(error: error))
     }
 
     func handleAudioPlayerCurrentItemChange(
