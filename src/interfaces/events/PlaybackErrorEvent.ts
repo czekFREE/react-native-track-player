@@ -3,4 +3,6 @@ export interface PlaybackErrorEvent {
   code: string;
   /** The error message */
   message: string;
+  /** The active track when a native audio-session error occurred, if available. */
+  trackId?: string;
 }

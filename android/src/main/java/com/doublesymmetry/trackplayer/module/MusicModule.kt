@@ -440,7 +440,7 @@ class MusicModule(reactContext: ReactApplicationContext) : NativeTrackPlayerSpec
         callback.resolve(null)
     }
 
-    override fun play(callback: Promise) = launchInScope {
+    override fun play(userInitiated: Boolean, callback: Promise) = launchInScope {
         Timber.tag(LOG_TAG).d("play()")
         if (verifyServiceBoundOrReject(callback)) return@launchInScope
 

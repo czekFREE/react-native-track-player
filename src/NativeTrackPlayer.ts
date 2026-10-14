@@ -9,7 +9,7 @@ export interface Spec extends TurboModule {
   // player api
   load(track: UnsafeObject): Promise<number | void>;
   reset(): Promise<void>;
-  play(): Promise<void>;
+  play(userInitiated: boolean): Promise<void>;
   pause(): Promise<void>;
   stop(): Promise<void>;
   setPlayWhenReady(playWhenReady: boolean): Promise<boolean>;
@@ -25,20 +25,14 @@ export interface Spec extends TurboModule {
   retry(): Promise<void>;
 
   // playlist management
-  add(
-    tracks: UnsafeObject[],
-    insertBeforeIndex?: number
-  ): Promise<number | void>;
+  add(tracks: UnsafeObject[], insertBeforeIndex?: number): Promise<number | void>;
   move(fromIndex: number, toIndex: number): Promise<void>;
   remove(indexes: number[]): Promise<void>;
   removeUpcomingTracks(): Promise<void>;
   skip(index: number, initialPosition?: number): Promise<void>;
   skipToNext(initialPosition?: number): Promise<void>;
   skipToPrevious(initialPosition?: number): Promise<void>;
-  updateMetadataForTrack(
-    trackIndex: number,
-    metadata: UnsafeObject
-  ): Promise<void>;
+  updateMetadataForTrack(trackIndex: number, metadata: UnsafeObject): Promise<void>;
   updateNowPlayingMetadata(metadata: UnsafeObject): Promise<void>;
   setQueue(tracks: UnsafeObject[]): Promise<void>;
   getQueue(): Promise<UnsafeObject[]>;
@@ -102,6 +96,6 @@ export interface Spec extends TurboModule {
   validateOnStartCommandIntent(): Promise<boolean>;
 }
 
-const module = TurboModuleRegistry.getEnforcing<Spec>('TrackPlayer');
-export const Constants = module?.getConstants();
-export default module;
+const trackPlayerModule = TurboModuleRegistry.getEnforcing<Spec>('TrackPlayer');
+export const Constants = trackPlayerModule?.getConstants();
+export default trackPlayerModule;

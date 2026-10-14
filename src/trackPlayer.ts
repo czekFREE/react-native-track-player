@@ -21,18 +21,16 @@ const emitter = new NativeEventEmitter(TrackPlayer);
 
 // MARK: - Helpers
 
+function resolveImportedAsset(id?: number) {
+  return id ? (resolveAssetSource(id) ?? undefined) : undefined;
+}
+
 function resolveImportedAssetOrPath(pathOrAsset: string | number | undefined) {
   return pathOrAsset === undefined
     ? undefined
     : typeof pathOrAsset === 'string'
       ? pathOrAsset
       : resolveImportedAsset(pathOrAsset);
-}
-
-function resolveImportedAsset(id?: number) {
-  return id
-    ? ((resolveAssetSource(id) as { uri: string } | null) ?? undefined)
-    : undefined;
 }
 
 function resolveTrackAssets(track: AddTrack) {
@@ -74,7 +72,7 @@ export function addEventListener<T extends Event>(
   event: T,
   listener: EventPayloadByEvent[T] extends never
     ? () => void
-    : (event: EventPayloadByEvent[T]) => void
+    : (event: EventPayloadByEvent[T]) => void,
 ) {
   return emitter.addListener(event, listener);
 }
@@ -92,10 +90,7 @@ export function removeAllEventListeners(eventType: string) {
  * @param insertBeforeIndex (Optional) The index to insert the tracks before.
  * By default the tracks will be added to the end of the queue.
  */
-export async function add(
-  tracks: AddTrack[],
-  insertBeforeIndex?: number
-): Promise<number | void>;
+export async function add(tracks: AddTrack[], insertBeforeIndex?: number): Promise<number | void>;
 /**
  * Adds a track to the queue.
  *
@@ -103,13 +98,10 @@ export async function add(
  * @param insertBeforeIndex (Optional) The index to insert the track before.
  * By default the track will be added to the end of the queue.
  */
-export async function add(
-  track: AddTrack,
-  insertBeforeIndex?: number
-): Promise<number | void>;
+export async function add(track: AddTrack, insertBeforeIndex?: number): Promise<number | void>;
 export async function add(
   tracks: AddTrack | AddTrack[],
-  insertBeforeIndex = -1
+  insertBeforeIndex = -1,
 ): Promise<number | void> {
   const addTracks = Array.isArray(tracks) ? tracks : [tracks];
   return addTracks.length < 1
@@ -158,9 +150,7 @@ export async function remove(indexes: number[]): Promise<void>;
  */
 export async function remove(index: number): Promise<void>;
 export async function remove(indexOrIndexes: number | number[]): Promise<void> {
-  return TrackPlayer.remove(
-    Array.isArray(indexOrIndexes) ? indexOrIndexes : [indexOrIndexes]
-  );
+  return TrackPlayer.remove(Array.isArray(indexOrIndexes) ? indexOrIndexes : [indexOrIndexes]);
 }
 
 /**
@@ -206,9 +196,7 @@ export async function skipToPrevious(initialPosition = -1): Promise<void> {
  * @param options The options to update.
  * @see https://doublesymmetry.github.io/react-native-track-player/docs/api/functions/player#updateoptionsoptions
  */
-export async function updateOptions(
-  options: UpdateOptions = {}
-): Promise<void> {
+export async function updateOptions(options: UpdateOptions = {}): Promise<void> {
   return TrackPlayer.updateOptions({
     ...options,
     android: {
@@ -226,7 +214,7 @@ export async function updateOptions(
  */
 export async function updateMetadataForTrack(
   trackIndex: number,
-  metadata: TrackMetadataBase
+  metadata: TrackMetadataBase,
 ): Promise<void> {
   return TrackPlayer.updateMetadataForTrack(trackIndex, {
     ...metadata,
@@ -238,9 +226,7 @@ export async function updateMetadataForTrack(
  * Updates the metadata content of the notification (Android) and the Now Playing Center (iOS)
  * without affecting the data stored for the current track.
  */
-export function updateNowPlayingMetadata(
-  metadata: NowPlayingMetadata
-): Promise<void> {
+export function updateNowPlayingMetadata(metadata: NowPlayingMetadata): Promise<void> {
   return TrackPlayer.updateNowPlayingMetadata({
     ...metadata,
     artwork: resolveImportedAssetOrPath(metadata.artwork),
@@ -259,8 +245,10 @@ export async function reset(): Promise<void> {
 /**
  * Plays or resumes the current track.
  */
-export async function play(): Promise<void> {
-  return TrackPlayer.play();
+export async function play({
+  userInitiated = true,
+}: { userInitiated?: boolean } = {}): Promise<void> {
+  return TrackPlayer.play(userInitiated);
 }
 
 /**
@@ -282,9 +270,7 @@ export async function stop(): Promise<void> {
  * This is the equivalent of calling `TrackPlayer.play()` when `playWhenReady = true`
  * or `TrackPlayer.pause()` when `playWhenReady = false`.
  */
-export async function setPlayWhenReady(
-  playWhenReady: boolean
-): Promise<boolean> {
+export async function setPlayWhenReady(playWhenReady: boolean): Promise<boolean> {
   return TrackPlayer.setPlayWhenReady(playWhenReady);
 }
 

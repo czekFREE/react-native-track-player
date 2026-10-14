@@ -1,10 +1,5 @@
 import React from 'react';
-import {
-  ActivityIndicator,
-  StyleSheet,
-  TouchableWithoutFeedback,
-  View,
-} from 'react-native';
+import { ActivityIndicator, StyleSheet, TouchableWithoutFeedback, View } from 'react-native';
 import TrackPlayer, { useIsPlaying } from 'react-native-track-player';
 import Icon from '@react-native-vector-icons/fontawesome6';
 
@@ -17,14 +12,9 @@ export const PlayPauseButton: React.FC = () => {
         <ActivityIndicator />
       ) : (
         <TouchableWithoutFeedback
-          onPress={playing ? TrackPlayer.pause : TrackPlayer.play}
+          onPress={() => (playing ? TrackPlayer.pause() : TrackPlayer.play())}
         >
-          <Icon
-            name={playing ? 'pause' : 'play'}
-            size={48}
-            color="white"
-            iconStyle="solid"
-          />
+          <Icon name={playing ? 'pause' : 'play'} size={48} color="white" iconStyle="solid" />
         </TouchableWithoutFeedback>
       )}
     </View>
