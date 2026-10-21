@@ -178,7 +178,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     // MARK: - RCTEventEmitter
     private func emit(event: EventType, body: Any? = nil) {
         if event.rawValue.hasPrefix("remote-") {
-            logTrackPlayerDevelopment("[CarPlay][Remote][Native] emit \(event.rawValue) body=\(String(describing: body))")
+            logTrackPlayerDevelopment("[Player][Remote][Native] emit \(event.rawValue) body=\(String(describing: body))")
         }
         delegate?.sendEvent(name: event.rawValue, body: body)
     }
@@ -558,7 +558,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
             }
 
         player.syncRemoteCommandsWithCommandCenter()
-        logTrackPlayerDevelopment("[CarPlay][Remote][Native] updateOptions capabilities=\(capabilitiesStr) remoteCommands=\(player.remoteCommands.count)")
+        logTrackPlayerDevelopment("[Player][Remote][Native] updateOptions capabilities=\(capabilitiesStr) remoteCommands=\(player.remoteCommands.count)")
 
         configureProgressUpdateEvent(
             interval: ((options["progressUpdateEventInterval"] as? NSNumber) ?? 0).doubleValue
