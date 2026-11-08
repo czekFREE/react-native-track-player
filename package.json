@@ -18,6 +18,7 @@
     "android",
     "ios",
     "cpp",
+    "vendor/SwiftAudioEx",
     "web/**/*",
     "*.podspec",
     "react-native.config.js",
