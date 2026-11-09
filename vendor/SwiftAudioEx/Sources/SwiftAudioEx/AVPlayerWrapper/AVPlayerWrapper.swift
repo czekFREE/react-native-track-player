@@ -20,6 +20,35 @@ public enum PlaybackEndedReason: String {
     case failed
 }
 
+private enum LoadedMetadataEvent {
+    case common([AVMetadataItem])
+    case chapter([AVTimedMetadataGroup])
+    case timed([AVTimedMetadataGroup])
+
+    var items: [AVMetadataItem] {
+        switch self {
+        case .common(let items): return items
+        case .chapter(let groups), .timed(let groups): return groups.flatMap { $0.items }
+        }
+    }
+
+    func replacingItems(with snapshots: [ObjectIdentifier: AVMetadataItem]) -> LoadedMetadataEvent {
+        func preparedItems(_ items: [AVMetadataItem]) -> [AVMetadataItem] {
+            items.compactMap { snapshots[ObjectIdentifier($0)] }
+        }
+        func preparedGroups(_ groups: [AVTimedMetadataGroup]) -> [AVTimedMetadataGroup] {
+            groups.map {
+                AVTimedMetadataGroup(items: preparedItems($0.items), timeRange: $0.timeRange)
+            }
+        }
+        switch self {
+        case .common(let items): return .common(preparedItems(items))
+        case .chapter(let groups): return .chapter(preparedGroups(groups))
+        case .timed(let groups): return .timed(preparedGroups(groups))
+        }
+    }
+}
+
 class AVPlayerWrapper: AVPlayerWrapperProtocol {
     // MARK: - Properties
     
@@ -33,12 +62,19 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
     fileprivate var item: AVPlayerItem? = nil
     fileprivate var url: URL? = nil
     fileprivate var urlOptions: [String: Any]? = nil
+    private static let metadataQueue = DispatchQueue(label: "AVPlayerWrapper.metadata")
+    private let makeAsset: (URL, [String: Any]?) -> AVAsset
+    private var pendingTimedMetadata: [[AVTimedMetadataGroup]] = []
+    private var isPreparingTimedMetadata = false
     fileprivate let stateQueue = DispatchQueue(
         label: "AVPlayerWrapper.stateQueue",
         attributes: .concurrent
     )
 
-    public init() {
+    init(
+        makeAsset: @escaping (URL, [String: Any]?) -> AVAsset = { AVURLAsset(url: $0, options: $1) }
+    ) {
+        self.makeAsset = makeAsset
         playerTimeObserver = AVPlayerTimeObserver(periodicObserverTimeInterval: timeEventFrequency.getTime())
 
         playerObserver.delegate = self
@@ -112,10 +148,13 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
     }
     
     var duration: TimeInterval {
-        if let seconds = currentItem?.asset.duration.seconds, !seconds.isNaN {
-            return seconds
+        if let currentItem = currentItem,
+            currentItem.asset.statusOfValue(forKey: "duration", error: nil) == .loaded
+        {
+            let seconds = currentItem.asset.duration.seconds
+            if !seconds.isNaN { return seconds }
         }
-        else if let seconds = currentItem?.duration.seconds, !seconds.isNaN {
+        if let seconds = currentItem?.duration.seconds, !seconds.isNaN {
             return seconds
         }
         else if let seconds = currentItem?.seekableTimeRanges.last?.timeRangeValue.duration.seconds,
@@ -234,42 +273,30 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
             clearCurrentItem()
         }
         if let url = url {
-            let pendingAsset = AVURLAsset(url: url, options: urlOptions)
+            let pendingAsset = makeAsset(url, urlOptions)
             asset = pendingAsset
             state = .loading
             
-            // Load metadata keys asynchronously and separate from playable, to allow that to execute as quickly as it can
-            let metdataKeys = ["commonMetadata", "availableChapterLocales", "availableMetadataFormats"]
-            pendingAsset.loadValuesAsynchronously(forKeys: metdataKeys, completionHandler: { [weak self] in
-                guard let self = self else { return }
-                if (pendingAsset != self.asset) { return; }
-                
-                let commonData = pendingAsset.commonMetadata
-                if (!commonData.isEmpty) {
-                    self.delegate?.AVWrapper(didReceiveCommonMetadata: commonData)
-                }
-                
-                if pendingAsset.availableChapterLocales.count > 0 {
-                    for locale in pendingAsset.availableChapterLocales {
-                        let chapters = pendingAsset.chapterMetadataGroups(withTitleLocale: locale, containingItemsWithCommonKeys: nil)
-                        self.delegate?.AVWrapper(didReceiveChapterMetadata: chapters)
-                    }
-                } else {
-                    for format in pendingAsset.availableMetadataFormats {
-                        let timeRange = CMTimeRange(start: CMTime(seconds: 0, preferredTimescale: 1000), end: pendingAsset.duration)
-                        let group = AVTimedMetadataGroup(items: pendingAsset.metadata(forFormat: format), timeRange: timeRange)
-                        self.delegate?.AVWrapper(didReceiveTimedMetadata: [group])
+            let metadataKeys = [
+                "commonMetadata", "availableChapterLocales", "availableMetadataFormats", "duration",
+            ]
+            pendingAsset.loadValuesAsynchronously(forKeys: metadataKeys) { [weak self] in
+                Self.metadataQueue.async {
+                    Self.collectMetadata(from: pendingAsset) { events in
+                        DispatchQueue.main.async { [weak self] in
+                            self?.deliver(events, for: pendingAsset)
+                        }
                     }
                 }
-            })
-            
+            }
+
             // Load playable portion of the track and commence when ready
             let playableKeys = ["playable"]
             pendingAsset.loadValuesAsynchronously(forKeys: playableKeys, completionHandler: { [weak self] in
                 guard let self = self else { return }
                 
                 DispatchQueue.main.async {
-                    if (pendingAsset != self.asset) { return; }
+                    if self.asset !== pendingAsset { return }
                     
                     for key in playableKeys {
                         var error: NSError?
@@ -373,15 +400,132 @@ class AVPlayerWrapper: AVPlayerWrapperProtocol {
     // MARK: - Util
 
     private func clearCurrentItem() {
-        guard let asset = asset else { return }
-        stopObservingAVPlayerItem()
-        
-        asset.cancelLoading()
+        let retiredAsset = asset
         self.asset = nil
-        
+        self.item = nil
+        pendingTimedMetadata.removeAll()
+        isPreparingTimedMetadata = false
+        stopObservingAVPlayerItem()
         avPlayer.replaceCurrentItem(with: nil)
+        retiredAsset?.cancelLoading()
     }
     
+    private static func collectMetadata(
+        from asset: AVAsset, completion: @escaping ([LoadedMetadataEvent]) -> Void
+    ) {
+        var events: [LoadedMetadataEvent] = []
+        if asset.statusOfValue(forKey: "commonMetadata", error: nil) == .loaded {
+            let items = asset.commonMetadata
+            if !items.isEmpty { events.append(.common(items)) }
+        }
+        guard asset.statusOfValue(forKey: "availableChapterLocales", error: nil) == .loaded else {
+            prepareMetadata(events, completion: completion)
+            return
+        }
+        let locales = asset.availableChapterLocales
+        if !locales.isEmpty {
+            for locale in locales {
+                let groups = asset.chapterMetadataGroups(
+                    withTitleLocale: locale, containingItemsWithCommonKeys: nil)
+                events.append(.chapter(groups))
+            }
+            prepareMetadata(events, completion: completion)
+            return
+        }
+        guard asset.statusOfValue(forKey: "availableMetadataFormats", error: nil) == .loaded else {
+            prepareMetadata(events, completion: completion)
+            return
+        }
+        let formats = asset.availableMetadataFormats
+        let duration =
+            asset.statusOfValue(forKey: "duration", error: nil) == .loaded
+            ? asset.duration : .invalid
+        let timeRange = CMTimeRange(start: .zero, end: duration)
+        let group = DispatchGroup()
+        var formatEvents = [LoadedMetadataEvent?](repeating: nil, count: formats.count)
+        for (index, format) in formats.enumerated() {
+            if #available(iOS 15, macOS 12, tvOS 15, watchOS 8, *) {
+                group.enter()
+                asset.loadMetadata(for: format) { items, _ in
+                    metadataQueue.async {
+                        if let items = items {
+                            formatEvents[index] = .timed([
+                                AVTimedMetadataGroup(items: items, timeRange: timeRange)
+                            ])
+                        }
+                        group.leave()
+                    }
+                }
+            } else {
+                let items = asset.metadata(forFormat: format)
+                formatEvents[index] = .timed([
+                    AVTimedMetadataGroup(items: items, timeRange: timeRange)
+                ])
+            }
+        }
+        let initialEvents = events
+        group.notify(queue: metadataQueue) {
+            prepareMetadata(initialEvents + formatEvents.compactMap { $0 }, completion: completion)
+        }
+    }
+
+    private static func prepareMetadata(
+        _ events: [LoadedMetadataEvent], completion: @escaping ([LoadedMetadataEvent]) -> Void
+    ) {
+        let group = DispatchGroup()
+        var snapshots: [ObjectIdentifier: AVMetadataItem] = [:]
+        for item in events.flatMap({ $0.items }) {
+            group.enter()
+            item.loadValuesAsynchronously(forKeys: ["value", "extraAttributes"]) {
+                metadataQueue.async {
+                    if item.statusOfValue(forKey: "value", error: nil) == .loaded,
+                        item.statusOfValue(forKey: "extraAttributes", error: nil) == .loaded,
+                        let mutableCopy = item.mutableCopy() as? AVMutableMetadataItem,
+                        let snapshot = mutableCopy.copy() as? AVMetadataItem
+                    {
+                        snapshots[ObjectIdentifier(item)] = snapshot
+                    }
+                    group.leave()
+                }
+            }
+        }
+        group.notify(queue: metadataQueue) {
+            let preparedEvents = events.map { $0.replacingItems(with: snapshots) }.filter {
+                if case .common(let items) = $0 { return !items.isEmpty }
+                return true
+            }
+            completion(preparedEvents)
+        }
+    }
+
+    private func deliver(_ events: [LoadedMetadataEvent], for asset: AVAsset) {
+        for event in events {
+            guard self.asset === asset else { return }
+            switch event {
+            case .common(let items): delegate?.AVWrapper(didReceiveCommonMetadata: items)
+            case .chapter(let groups): delegate?.AVWrapper(didReceiveChapterMetadata: groups)
+            case .timed(let groups): delegate?.AVWrapper(didReceiveTimedMetadata: groups)
+            }
+        }
+    }
+
+    private func prepareNextTimedMetadata(for asset: AVAsset) {
+        guard !isPreparingTimedMetadata, !pendingTimedMetadata.isEmpty else { return }
+        let metadata = pendingTimedMetadata.removeFirst()
+        isPreparingTimedMetadata = true
+        Self.metadataQueue.async {
+            Self.prepareMetadata([.timed(metadata)]) { [weak self] events in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, self.asset === asset else { return }
+                    self.isPreparingTimedMetadata = false
+                    self.deliver(events, for: asset)
+                    guard self.asset === asset else { return }
+                    self.prepareNextTimedMetadata(for: asset)
+                }
+            }
+        }
+    }
+
     private func startObservingAVPlayer(item: AVPlayerItem) {
         playerItemObserver.startObserving(item: item)
         playerItemNotificationObserver.startObserving(item: item)
@@ -514,6 +658,8 @@ extension AVPlayerWrapper: AVPlayerItemObserverDelegate {
     }
     
     func item(didReceiveTimedMetadata metadata: [AVTimedMetadataGroup]) {
-        delegate?.AVWrapper(didReceiveTimedMetadata: metadata)
+        guard let asset = asset else { return }
+        pendingTimedMetadata.append(metadata)
+        prepareNextTimedMetadata(for: asset)
     }
 }
