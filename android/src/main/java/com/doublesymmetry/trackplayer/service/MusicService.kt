@@ -31,17 +31,18 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionCommands
 import androidx.media3.session.SessionResult
-import com.doublesymmetry.kotlinaudio.models.*
-import com.doublesymmetry.kotlinaudio.players.QueuedAudioPlayer
+import com.doublesymmetry.trackplayer.model.Capability
+import com.doublesymmetry.trackplayer.model.CustomCommandButton
+import com.doublesymmetry.trackplayer.model.RepeatMode
+import com.doublesymmetry.trackplayer.model.State
+import com.doublesymmetry.trackplayer.player.*
 import com.doublesymmetry.trackplayer.HeadlessJsMediaService
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toMilliseconds
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toSeconds
-import com.doublesymmetry.trackplayer.extensions.asLibState
 import com.doublesymmetry.trackplayer.extensions.find
 import com.doublesymmetry.trackplayer.model.MetadataAdapter
 import com.doublesymmetry.trackplayer.model.PlaybackMetadata
 import com.doublesymmetry.trackplayer.model.Track
-import com.doublesymmetry.trackplayer.model.TrackAudioItem
 import com.doublesymmetry.trackplayer.module.MusicEvents
 import com.doublesymmetry.trackplayer.module.MusicEvents.Companion.METADATA_PAYLOAD_KEY
 import com.doublesymmetry.trackplayer.utils.BundleUtils
@@ -55,16 +56,15 @@ import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flow
 import com.doublesymmetry.trackplayer.DevelopmentLogger as Timber
-import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 @OptIn(UnstableApi::class)
 @MainThread
 class MusicService : HeadlessJsMediaService() {
-     private lateinit var player: QueuedAudioPlayer
+     private lateinit var player: RNTPPlaybackController
     private val binder = MusicBinder()
     private val scope = MainScope()
-    private lateinit var fakePlayer: ExoPlayer
+    private var fakePlayer: ExoPlayer? = null
     private lateinit var mediaSession: MediaLibrarySession
     private var mediaSessionReleased = false
     private var progressUpdateJob: Job? = null
@@ -89,7 +89,7 @@ class MusicService : HeadlessJsMediaService() {
     }
 
     fun getCurrentBitmap(): ListenableFuture<Bitmap>? {
-        return player.exoPlayer.currentMediaItem?.mediaMetadata?.let {
+        return player.transportPlayer.currentMediaItem?.mediaMetadata?.let {
             mediaSession.bitmapLoader.loadBitmapFromMetadata(
                 it
             )
@@ -100,14 +100,15 @@ class MusicService : HeadlessJsMediaService() {
     override fun onCreate() {
         Timber.tag(LOG_TAG).d("onCreate()")
 
-        fakePlayer = ExoPlayer.Builder(this).build()
+        val startupPlayer = ExoPlayer.Builder(this).build()
+        fakePlayer = startupPlayer
         val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             // Add the Uri data so apps can identify that it was a notification click
             data = Uri.parse("trackplayer://notification.click")
             action = Intent.ACTION_VIEW
         }
-        mediaSession = MediaLibrarySession.Builder(this, fakePlayer,
+        mediaSession = MediaLibrarySession.Builder(this, startupPlayer,
             InnerMediaSessionCallback()
         )
             .setId("${packageName}.trackplayer.music-service")
@@ -140,32 +141,25 @@ class MusicService : HeadlessJsMediaService() {
     private var stopForegroundGracePeriod: Int = DEFAULT_STOP_FOREGROUND_GRACE_PERIOD
 
     val tracks: List<Track>
-        get() = player.items.map { (it as TrackAudioItem).track }
+        get() = player.tracks
 
     val currentTrack: Track?
         get() {
-            return (player.currentItem as TrackAudioItem?)?.track
+            return player.currentTrack
         }
 
     val state
-        get() = player.playerState
+        get() = player.state
 
-    var ratingType: Int
-        get() = player.ratingType
-        set(value) {
-            player.ratingType = value
-        }
+    var ratingType: Int = 0
 
     val playbackError
         get() = player.playbackError
 
-    val event
-        get() = player.playerEventHolder
-
     var playWhenReady: Boolean
-        get() = player.playWhenReady
+        get() = player.transportPlayer.playWhenReady
         set(value) {
-            player.playWhenReady = value
+            player.transportPlayer.playWhenReady = value
         }
 
     private var latestOptions: Bundle? = null
@@ -209,7 +203,13 @@ class MusicService : HeadlessJsMediaService() {
         }
 
         mediaSessionReleased = true
-        mediaSession.release()
+        val startupPlayer = fakePlayer
+        fakePlayer = null
+        try {
+            mediaSession.release()
+        } finally {
+            startupPlayer?.release()
+        }
     }
 
     @MainThread
@@ -220,8 +220,7 @@ class MusicService : HeadlessJsMediaService() {
             Timber.tag(LOG_TAG).d("setupPlayer() - Player was initialized previously. Preventing reinitialization")
             return
         }
-        val options = PlayerOptions(
-            alwaysShowNext = playerOptions?.getBoolean(ALWAYS_SHOW_NEXT, true) ?: true,
+        val options = PlaybackOptions(
             audioContentType = when (playerOptions?.getString(ANDROID_AUDIO_CONTENT_TYPE)) {
                 "music" -> C.AUDIO_CONTENT_TYPE_MUSIC
                 "speech" -> C.AUDIO_CONTENT_TYPE_SPEECH
@@ -239,16 +238,13 @@ class MusicService : HeadlessJsMediaService() {
             cacheSizeKb = playerOptions?.getDouble(MAX_CACHE_SIZE_KEY)?.toLong() ?: 0,
             handleAudioBecomingNoisy = playerOptions?.getBoolean(HANDLE_NOISY, true) ?: true,
             handleAudioFocus = playerOptions?.getBoolean(AUTO_HANDLE_INTERRUPTIONS) ?: true,
-            interceptPlayerActionsTriggeredExternally = true,
             skipSilence = playerOptions?.getBoolean(SKIP_SILENCE) ?: false,
             wakeMode = playerOptions?.getInt(WAKE_MODE, 0) ?: 0
         )
-        player = QueuedAudioPlayer(this@MusicService, options)
-        fakePlayer.release()
-        // mediaSession.player = player.forwardingPlayer
-        mediaSession.setPlayer(player.forwardingPlayer)
-
-        observeEvents()
+        player = RNTPPlaybackController(this@MusicService, options, ::handlePlaybackEvent)
+        mediaSession.setPlayer(player.sessionPlayer)
+        fakePlayer?.release()
+        fakePlayer = null
     }
 
     @MainThread
@@ -260,7 +256,7 @@ class MusicService : HeadlessJsMediaService() {
             player.setAudioOffload(androidOptions.getBoolean(AUDIO_OFFLOAD_KEY))
         }
         if (androidOptions?.containsKey(SKIP_SILENCE) == true) {
-            player.skipSilence = androidOptions.getBoolean(SKIP_SILENCE)
+            player.setSkipSilence(androidOptions.getBoolean(SKIP_SILENCE))
         }
 
         appKilledPlaybackBehavior =
@@ -273,9 +269,9 @@ class MusicService : HeadlessJsMediaService() {
         BundleUtils.getIntOrNull(androidOptions, STOP_FOREGROUND_GRACE_PERIOD_KEY)
             ?.let { stopForegroundGracePeriod = it }
 
-        player.alwaysPauseOnInterruption =
+        player.options.alwaysPauseOnInterruption =
             androidOptions?.getBoolean(PAUSE_ON_INTERRUPTION_KEY) ?: false
-        player.shuffleMode = androidOptions?.getBoolean(SHUFFLE_KEY) ?: false
+        player.transportPlayer.shuffleModeEnabled = androidOptions?.getBoolean(SHUFFLE_KEY) ?: false
 
         // setup progress update events if configured
         progressUpdateJob?.cancel()
@@ -309,7 +305,6 @@ class MusicService : HeadlessJsMediaService() {
             Player.COMMAND_GET_DEVICE_VOLUME,
             Player.COMMAND_GET_TEXT,
             Player.COMMAND_SEEK_TO_MEDIA_ITEM,
-            Player.COMMAND_SET_MEDIA_ITEM,
             Player.COMMAND_PREPARE,
             Player.COMMAND_RELEASE,
         )
@@ -359,7 +354,7 @@ class MusicService : HeadlessJsMediaService() {
     @MainThread
     private fun progressUpdateEventFlow(interval: Double) = flow {
         while (true) {
-            if (player.isPlaying) {
+            if (player.transportPlayer.isPlaying) {
                 val bundle = progressUpdateEvent()
                 emit(bundle)
             }
@@ -375,7 +370,7 @@ class MusicService : HeadlessJsMediaService() {
                 putDouble(POSITION_KEY, player.position.toSeconds())
                 putDouble(DURATION_KEY, player.duration.toSeconds())
                 putDouble(BUFFERED_POSITION_KEY, player.bufferedPosition.toSeconds())
-                putInt(TRACK_KEY, player.currentIndex)
+                putInt(TRACK_KEY, player.transportPlayer.currentMediaItemIndex)
             }
         }
     }
@@ -387,24 +382,22 @@ class MusicService : HeadlessJsMediaService() {
 
     @MainThread
     fun add(tracks: List<Track>) {
-        val items = tracks.map { it.toAudioItem() }
-        player.add(items)
+        player.addTracks(tracks)
     }
 
     @MainThread
     fun add(tracks: List<Track>, atIndex: Int) {
-        val items = tracks.map { it.toAudioItem() }
-        player.add(items, atIndex)
+        player.addTracks(tracks, atIndex)
     }
 
     @MainThread
     fun load(track: Track) {
-        player.load(track.toAudioItem())
+        player.load(track)
     }
 
     @MainThread
     fun move(fromIndex: Int, toIndex: Int) {
-        player.move(fromIndex, toIndex);
+        player.transportPlayer.moveMediaItem(fromIndex, toIndex)
     }
 
     @MainThread
@@ -414,22 +407,23 @@ class MusicService : HeadlessJsMediaService() {
 
     @MainThread
     fun remove(indexes: List<Int>) {
-        player.remove(indexes)
+        player.removeTracks(indexes)
     }
 
     @MainThread
     fun clear() {
-        player.clear()
+        player.transportPlayer.clearMediaItems()
     }
 
     @MainThread
     fun play() {
-        player.play()
+        player.transportPlayer.play()
+        if (currentTrack != null) player.transportPlayer.prepare()
     }
 
     @MainThread
     fun pause() {
-        player.pause()
+        player.transportPlayer.pause()
     }
 
     @MainThread
@@ -439,61 +433,75 @@ class MusicService : HeadlessJsMediaService() {
 
     @MainThread
     fun removeUpcomingTracks() {
-        player.removeUpcomingItems()
+        val transport = player.transportPlayer
+        if (transport.mediaItemCount > 0) {
+            transport.removeMediaItems(transport.currentMediaItemIndex + 1, transport.mediaItemCount)
+        }
     }
 
     @MainThread
     fun removePreviousTracks() {
-        player.removePreviousItems()
+        player.transportPlayer.removeMediaItems(0, player.transportPlayer.currentMediaItemIndex)
     }
 
     @MainThread
     fun skip(index: Int) {
-        player.jumpToItem(index)
+        player.transportPlayer.seekTo(index, C.TIME_UNSET)
+        player.transportPlayer.prepare()
     }
 
     @MainThread
     fun skipToNext() {
-        player.next()
+        player.transportPlayer.seekToNextMediaItem()
+        player.transportPlayer.prepare()
     }
 
     @MainThread
     fun skipToPrevious() {
-        player.previous()
+        player.transportPlayer.seekToPreviousMediaItem()
+        player.transportPlayer.prepare()
     }
 
     @MainThread
     fun seekTo(seconds: Float) {
-        player.seek((seconds * 1000).toLong(), TimeUnit.MILLISECONDS)
+        player.transportPlayer.seekTo((seconds * 1000).toLong())
     }
 
     @MainThread
     fun seekBy(offset: Float) {
-        player.seekBy((offset.toLong()), TimeUnit.SECONDS)
+        player.transportPlayer.seekTo(player.position + offset.toLong() * 1000)
     }
 
     @MainThread
     fun retry() {
-        player.prepare()
+        if (currentTrack != null) player.transportPlayer.prepare()
     }
 
     @MainThread
-    fun getCurrentTrackIndex(): Int = player.currentIndex
+    fun getCurrentTrackIndex(): Int = player.transportPlayer.currentMediaItemIndex
 
     @MainThread
-    fun getRate(): Float = player.playbackSpeed
+    fun getRate(): Float = player.transportPlayer.playbackParameters.speed
 
     @MainThread
     fun setRate(value: Float) {
-        player.playbackSpeed = value
+        player.transportPlayer.setPlaybackSpeed(value)
     }
 
     @MainThread
-    fun getRepeatMode(): RepeatMode = player.repeatMode
+    fun getRepeatMode(): RepeatMode = when (player.transportPlayer.repeatMode) {
+        Player.REPEAT_MODE_ONE -> RepeatMode.ONE
+        Player.REPEAT_MODE_ALL -> RepeatMode.ALL
+        else -> RepeatMode.OFF
+    }
 
     @MainThread
     fun setRepeatMode(value: RepeatMode) {
-        player.repeatMode = value
+        player.transportPlayer.repeatMode = when (value) {
+            RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+            RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+            RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+        }
     }
 
     @MainThread
@@ -514,11 +522,11 @@ class MusicService : HeadlessJsMediaService() {
     fun getBufferedPositionInSeconds(): Double = player.bufferedPosition.toSeconds()
 
     @MainThread
-    fun getPlayerStateBundle(state: AudioPlayerState): Bundle {
+    fun getPlayerStateBundle(state: State, error: PlaybackError? = playbackError): Bundle {
         val bundle = Bundle()
-        bundle.putString(STATE_KEY, state.asLibState.state)
-        if (state == AudioPlayerState.ERROR) {
-            bundle.putBundle(ERROR_KEY, getPlaybackErrorBundle())
+        bundle.putString(STATE_KEY, state.state)
+        if (state == State.Error) {
+            bundle.putBundle(ERROR_KEY, getPlaybackErrorBundle(error))
         }
         return bundle
     }
@@ -528,135 +536,68 @@ class MusicService : HeadlessJsMediaService() {
         tracks[index].let { currentTrack ->
             currentTrack.setMetadata(reactContext, bundle, 0)
 
-            player.replaceItem(index, currentTrack.toAudioItem())
+            player.replaceTrackMetadata(index)
         }
     }
 
     @MainThread
     fun updateNowPlayingMetadata(bundle: Bundle) {
-        updateMetadataForTrack(player.currentIndex, bundle)
-    }
-
-    private fun emitPlaybackTrackChangedEvents(
-        previousIndex: Int?,
-        oldPosition: Double
-    ) {
-        val bundle = Bundle()
-        bundle.putDouble("lastPosition", oldPosition)
-        if (tracks.isNotEmpty()) {
-            bundle.putInt("index", player.currentIndex)
-            bundle.putBundle("track", tracks[player.currentIndex].originalItem)
-            if (previousIndex != null) {
-                bundle.putInt("lastIndex", previousIndex)
-                bundle.putBundle("lastTrack", tracks[previousIndex].originalItem)
-            }
-        }
-        emit(MusicEvents.PLAYBACK_ACTIVE_TRACK_CHANGED, bundle)
-    }
-
-    private fun emitQueueEndedEvent() {
-        val bundle = Bundle()
-        bundle.putInt(TRACK_KEY, player.currentIndex)
-        bundle.putDouble(POSITION_KEY, player.position.toSeconds())
-        emit(MusicEvents.PLAYBACK_QUEUE_ENDED, bundle)
+        updateMetadataForTrack(player.transportPlayer.currentMediaItemIndex, bundle)
     }
 
     @MainThread
-    private fun observeEvents() {
-        scope.launch {
-            event.stateChange.collect {
-                emit(MusicEvents.PLAYBACK_STATE, getPlayerStateBundle(it))
-
-                if (it == AudioPlayerState.ENDED && player.nextItem == null) {
-                    emitQueueEndedEvent()
+    private fun handlePlaybackEvent(event: RNTPPlaybackEvent) {
+        when (event) {
+            is RNTPPlaybackEvent.StateChanged -> emit(
+                MusicEvents.PLAYBACK_STATE,
+                getPlayerStateBundle(event.state, event.error),
+            )
+            is RNTPPlaybackEvent.TrackChanged -> emit(MusicEvents.PLAYBACK_ACTIVE_TRACK_CHANGED, Bundle().apply {
+                putDouble("lastPosition", event.previousPositionMs.toSeconds())
+                event.index?.let { putInt("index", it) }
+                event.track?.let { putBundle("track", it) }
+                event.previousIndex?.let { putInt("lastIndex", it) }
+                event.previousTrack?.let { putBundle("lastTrack", it) }
+            })
+            is RNTPPlaybackEvent.QueueEnded -> emit(MusicEvents.PLAYBACK_QUEUE_ENDED, Bundle().apply {
+                putInt(TRACK_KEY, event.index)
+                putDouble(POSITION_KEY, event.positionMs.toSeconds())
+            })
+            is RNTPPlaybackEvent.FocusChanged -> emit(MusicEvents.BUTTON_DUCK, Bundle().apply {
+                putBoolean(IS_FOCUS_LOSS_PERMANENT_KEY, event.permanent)
+                putBoolean(IS_PAUSED_KEY, event.paused)
+            })
+            is RNTPPlaybackEvent.Remote -> when (event.command) {
+                RemoteCommand.SEEK -> emit(MusicEvents.BUTTON_SEEK_TO, Bundle().apply {
+                    putDouble("position", event.positionMs.toSeconds())
+                })
+                RemoteCommand.PLAY -> emit(MusicEvents.BUTTON_PLAY)
+                RemoteCommand.PAUSE -> emit(MusicEvents.BUTTON_PAUSE)
+                RemoteCommand.NEXT -> emit(MusicEvents.BUTTON_SKIP_NEXT)
+                RemoteCommand.PREVIOUS -> emit(MusicEvents.BUTTON_SKIP_PREVIOUS)
+                RemoteCommand.STOP -> emit(MusicEvents.BUTTON_STOP)
+                RemoteCommand.FORWARD, RemoteCommand.REWIND -> {
+                    val forward = event.command == RemoteCommand.FORWARD
+                    val interval = latestOptions?.getDouble(
+                        if (forward) FORWARD_JUMP_INTERVAL_KEY else BACKWARD_JUMP_INTERVAL_KEY,
+                        DEFAULT_JUMP_INTERVAL,
+                    ) ?: DEFAULT_JUMP_INTERVAL
+                    emit(if (forward) MusicEvents.BUTTON_JUMP_FORWARD else MusicEvents.BUTTON_JUMP_BACKWARD, Bundle().apply {
+                        putInt("interval", interval.toInt())
+                    })
                 }
             }
-        }
-
-        scope.launch {
-            event.audioItemTransition.collect {
-                if (it !is AudioItemTransitionReason.REPEAT) {
-                    emitPlaybackTrackChangedEvents(
-                        player.previousIndex,
-                        (it?.oldPosition ?: 0).toSeconds()
-                    )
-                }
-            }
-        }
-
-        scope.launch {
-            event.onAudioFocusChanged.collect {
-                Bundle().apply {
-                    putBoolean(IS_FOCUS_LOSS_PERMANENT_KEY, it.isFocusLostPermanently)
-                    putBoolean(IS_PAUSED_KEY, it.isPaused)
-                    emit(MusicEvents.BUTTON_DUCK, this)
-                }
-            }
-        }
-
-        scope.launch {
-            event.onPlayerActionTriggeredExternally.collect {
-                when (it) {
-                    is MediaSessionCallback.RATING -> {
-                        Bundle().apply {
-                            setRating(this, "rating", it.rating)
-                            emit(MusicEvents.BUTTON_SET_RATING, this)
-                        }
-                    }
-
-                    is MediaSessionCallback.SEEK -> {
-                        Bundle().apply {
-                            putDouble("position", it.positionMs.toSeconds())
-                            emit(MusicEvents.BUTTON_SEEK_TO, this)
-                        }
-                    }
-
-                    MediaSessionCallback.PLAY -> emit(MusicEvents.BUTTON_PLAY)
-                    MediaSessionCallback.PAUSE -> emit(MusicEvents.BUTTON_PAUSE)
-                    MediaSessionCallback.NEXT -> emit(MusicEvents.BUTTON_SKIP_NEXT)
-                    MediaSessionCallback.PREVIOUS -> emit(MusicEvents.BUTTON_SKIP_PREVIOUS)
-                    MediaSessionCallback.STOP -> emit(MusicEvents.BUTTON_STOP)
-                    MediaSessionCallback.FORWARD -> {
-                        Bundle().apply {
-                            val interval = latestOptions?.getDouble(
-                                FORWARD_JUMP_INTERVAL_KEY,
-                                DEFAULT_JUMP_INTERVAL
-                            ) ?: DEFAULT_JUMP_INTERVAL
-                            putInt("interval", interval.toInt())
-                            emit(MusicEvents.BUTTON_JUMP_FORWARD, this)
-                        }
-                    }
-
-                    MediaSessionCallback.REWIND -> {
-                        Bundle().apply {
-                            val interval = latestOptions?.getDouble(
-                                BACKWARD_JUMP_INTERVAL_KEY,
-                                DEFAULT_JUMP_INTERVAL
-                            ) ?: DEFAULT_JUMP_INTERVAL
-                            putInt("interval", interval.toInt())
-                            emit(MusicEvents.BUTTON_JUMP_BACKWARD, this)
-                        }
-                    }
-                }
-            }
-        }
-
-        scope.launch {
-            event.onTimedMetadata.collect {
-                val data = MetadataAdapter.fromMetadata(it)
-                val bundle = Bundle().apply {
+            is RNTPPlaybackEvent.TimedMetadata -> {
+                val data = MetadataAdapter.fromMetadata(event.metadata)
+                emit(MusicEvents.METADATA_TIMED_RECEIVED, Bundle().apply {
                     putParcelableArrayList(METADATA_PAYLOAD_KEY, ArrayList(data))
-                }
-                emit(MusicEvents.METADATA_TIMED_RECEIVED, bundle)
-
-                // TODO: Handle the different types of metadata and publish to new events
-                val metadata = PlaybackMetadata.fromId3Metadata(it)
-                    ?: PlaybackMetadata.fromIcy(it)
-                    ?: PlaybackMetadata.fromVorbisComment(it)
-                    ?: PlaybackMetadata.fromQuickTime(it)
-
+                })
+                val metadata = PlaybackMetadata.fromId3Metadata(event.metadata)
+                    ?: PlaybackMetadata.fromIcy(event.metadata)
+                    ?: PlaybackMetadata.fromVorbisComment(event.metadata)
+                    ?: PlaybackMetadata.fromQuickTime(event.metadata)
                 if (metadata != null) {
-                    Bundle().apply {
+                    emit(MusicEvents.PLAYBACK_METADATA, Bundle().apply {
                         putString("source", metadata.source)
                         putString("title", metadata.title)
                         putString("url", metadata.url)
@@ -664,41 +605,21 @@ class MusicService : HeadlessJsMediaService() {
                         putString("album", metadata.album)
                         putString("date", metadata.date)
                         putString("genre", metadata.genre)
-                        emit(MusicEvents.PLAYBACK_METADATA, this)
-                    }
+                    })
                 }
             }
-        }
-
-        scope.launch {
-            event.onCommonMetadata.collect {
-                val data = MetadataAdapter.fromMediaMetadata(it)
-                val bundle = Bundle().apply {
-                    putBundle(METADATA_PAYLOAD_KEY, data)
-                }
-                emit(MusicEvents.METADATA_COMMON_RECEIVED, bundle)
-            }
-        }
-
-        scope.launch {
-            event.playWhenReadyChange.collect {
-                Bundle().apply {
-                    putBoolean("playWhenReady", it.playWhenReady)
-                    emit(MusicEvents.PLAYBACK_PLAY_WHEN_READY_CHANGED, this)
-                }
-            }
-        }
-
-        scope.launch {
-            event.playbackError.collect {
-                emit(MusicEvents.PLAYBACK_ERROR, getPlaybackErrorBundle())
-            }
+            is RNTPPlaybackEvent.CommonMetadata -> emit(MusicEvents.METADATA_COMMON_RECEIVED, Bundle().apply {
+                putBundle(METADATA_PAYLOAD_KEY, MetadataAdapter.fromMediaMetadata(event.metadata))
+            })
+            is RNTPPlaybackEvent.PlayWhenReadyChanged -> emit(MusicEvents.PLAYBACK_PLAY_WHEN_READY_CHANGED, Bundle().apply {
+                putBoolean("playWhenReady", event.playWhenReady)
+            })
+            is RNTPPlaybackEvent.Error -> emit(MusicEvents.PLAYBACK_ERROR, getPlaybackErrorBundle(event.error))
         }
     }
 
-    private fun getPlaybackErrorBundle(): Bundle {
+    private fun getPlaybackErrorBundle(error: PlaybackError? = playbackError): Bundle {
         val bundle = Bundle()
-        val error = playbackError
         if (error?.message != null) {
             bundle.putString("message", error.message)
         }
@@ -770,7 +691,7 @@ class MusicService : HeadlessJsMediaService() {
         when (appKilledPlaybackBehavior) {
             AppKilledPlaybackBehavior.PAUSE_PLAYBACK -> {
                 Timber.tag(LOG_TAG).d("onTaskRemoved() - Pausing playback - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
-                player.pause()
+                player.transportPlayer.pause()
             }
             AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION -> {
                 Timber.tag(LOG_TAG).d("onTaskRemoved() - Killing service - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
@@ -778,11 +699,11 @@ class MusicService : HeadlessJsMediaService() {
                 // emit("destroy")
 
                 releaseMediaSession()
-                player.clear()
+                player.transportPlayer.clearMediaItems()
                 player.stop()
                 // HACK: the service first stops, then starts, then call onTaskRemove. Why system
                 // registers the service being restarted?
-                player.destroy()
+                player.release()
                 scope.cancel()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -851,7 +772,7 @@ class MusicService : HeadlessJsMediaService() {
             Timber.tag(LOG_TAG).w(throwable, "onDestroy() - mediaSession.release() failed")
         }
         if (::player.isInitialized) {
-            player.destroy()
+            player.release()
         }
 
         progressUpdateJob?.cancel()
@@ -1048,7 +969,7 @@ class MusicService : HeadlessJsMediaService() {
         ): ListenableFuture<SessionResult> {
             Timber.tag(LOG_TAG).d("InnerMediaSessionCallback.onCustomCommand() - ${controller} ${command} ${args}")
 
-            player.forwardingPlayer.let {
+            player.sessionPlayer.let {
                 when (command.customAction) {
                     CustomCommandButton.JUMP_BACKWARD.customAction -> { it.seekBack() }
                     CustomCommandButton.JUMP_FORWARD.customAction -> { it.seekForward() }

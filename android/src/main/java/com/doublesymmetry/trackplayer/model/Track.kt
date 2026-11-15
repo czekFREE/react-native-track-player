@@ -6,10 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
-import com.doublesymmetry.kotlinaudio.models.AudioItemOptions
-import com.doublesymmetry.kotlinaudio.models.MediaType
 import com.doublesymmetry.trackplayer.utils.BundleUtils
-import androidx.media3.datasource.RawResourceDataSource
 
 /**
  * @author Milen Pivchev @mpivchev
@@ -24,27 +21,12 @@ class Track
     var userAgent: String?
     var originalItem: Bundle
     var headers: HashMap<String, String>? = null
-    val queueId: Long
 
     override fun setMetadata(context: Context, bundle: Bundle?, ratingType: Int) {
         super.setMetadata(context, bundle, ratingType)
         originalItem.putAll(bundle)
     }
 
-    fun toAudioItem(): TrackAudioItem {
-        return TrackAudioItem(
-            track = this,
-            type = type,
-            audioUrl = uri.toString(),
-            artist = artist,
-            title = title,
-            albumTitle = album,
-            artwork = artwork.toString(),
-            duration = duration,
-            options = AudioItemOptions(headers, userAgent, resourceId),
-            mediaId = mediaId
-        )
-    }
 
     init {
         originalItem = bundle
@@ -60,7 +42,7 @@ class Track
         }
         val trackType = bundle.getString("type", "default")
         for (t in MediaType.entries) {
-            if (t.name.equals(trackType, ignoreCase = true)) {
+            if (t.value.equals(trackType, ignoreCase = true) || t.name.equals(trackType, ignoreCase = true)) {
                 type = t
                 break
             }
@@ -75,6 +57,5 @@ class Track
             }
         }
         setMetadata(context, bundle, ratingType)
-        queueId = System.currentTimeMillis()
     }
 }

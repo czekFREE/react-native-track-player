@@ -12,8 +12,8 @@ import android.support.v4.media.RatingCompat
 import androidx.media3.common.MediaItem
 import androidx.media.utils.MediaConstants
 import androidx.media3.common.MediaMetadata
-import com.doublesymmetry.kotlinaudio.models.Capability
-import com.doublesymmetry.kotlinaudio.models.RepeatMode
+import com.doublesymmetry.trackplayer.model.Capability
+import com.doublesymmetry.trackplayer.model.RepeatMode
 import com.doublesymmetry.trackplayer.model.State
 import com.doublesymmetry.trackplayer.model.Track
 import com.doublesymmetry.trackplayer.module.MusicEvents.Companion.EVENT_INTENT
