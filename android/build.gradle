@@ -72,6 +72,7 @@ repositories {
 def kotlin_version = getExtOrDefault("kotlinVersion")
 
 dependencies {
+  implementation project(':kotlin-audio')
   implementation "com.facebook.react:react-android"
   implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
 
@@ -89,9 +90,6 @@ dependencies {
   implementation("androidx.media3:media3-exoplayer:1.8.0")
   implementation("androidx.media3:media3-session:1.8.0")
   implementation("androidx.media3:media3-ui:1.8.0")
-  implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
-  implementation("androidx.media3:media3-exoplayer-dash:1.8.0")
-  implementation("androidx.media3:media3-exoplayer-smoothstreaming:1.8.0")
   implementation("androidx.media3:media3-common:1.8.0")
 
   implementation "com.google.guava:guava:33.0.0-android"
