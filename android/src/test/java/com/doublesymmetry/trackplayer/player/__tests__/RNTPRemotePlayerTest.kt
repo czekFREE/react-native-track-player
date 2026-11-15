@@ -1,6 +1,7 @@
 package com.doublesymmetry.trackplayer.player
 
 import android.content.Context
+import android.os.Looper
 import androidx.media3.common.Player
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
@@ -9,6 +10,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -44,27 +46,41 @@ class RNTPRemotePlayerTest {
     }
 
     @Test
-    fun commandChangeCallbacksUseTheSameFilteredCapabilitiesAndListenerIdentity() {
+    fun listenersReceiveJavaDefaultCallbacksAndCanBeRemoved() {
         val context: Context = RuntimeEnvironment.getApplication()
         val engine = ExoPlayer.Builder(context).build()
         try {
             val remote = RNTPRemotePlayer(engine) {}
-            val commands = mutableListOf<Player.Commands>()
+            val states = mutableListOf<Int>()
+            val readyToPlay = mutableListOf<Boolean>()
+            val eventPlayers = mutableListOf<Player>()
             val listener = object : Player.Listener {
-                override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
-                    commands.add(availableCommands)
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    states.add(playbackState)
+                }
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                    readyToPlay.add(playWhenReady)
+                }
+                override fun onEvents(player: Player, events: Player.Events) {
+                    eventPlayers.add(player)
                 }
             }
             remote.addListener(listener)
             remote.addListener(listener)
             engine.addMediaItem(MediaItem.fromUri("https://example.invalid/fixture.mp3"))
-            assertEquals(1, commands.size)
-            assertFalse(commands.single().contains(Player.COMMAND_SET_MEDIA_ITEM))
-            assertFalse(commands.single().contains(Player.COMMAND_CHANGE_MEDIA_ITEMS))
-            assertEquals(remote.availableCommands, commands.single())
+            engine.playWhenReady = true
+            engine.prepare()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(states.contains(Player.STATE_BUFFERING))
+            assertEquals(listOf(true), readyToPlay)
+            assertTrue(eventPlayers.isNotEmpty())
+            assertTrue(eventPlayers.all { it === remote })
             remote.removeListener(listener)
-            engine.clearMediaItems()
-            assertEquals(1, commands.size)
+            val callbackCount = states.size + readyToPlay.size + eventPlayers.size
+            engine.pause()
+            engine.stop()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(callbackCount, states.size + readyToPlay.size + eventPlayers.size)
         } finally { engine.release() }
     }
 

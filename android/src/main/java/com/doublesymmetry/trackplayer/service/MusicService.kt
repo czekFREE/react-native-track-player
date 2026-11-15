@@ -941,24 +941,26 @@ class MusicService : HeadlessJsMediaService() {
                     onStartCommand(null, 0, 0)
                 }
             }
-            return if (
-                isMediaNotificationController ||
-                isAutomotiveController ||
-                isAutoCompanionController
-            ) {
-                MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                    .setCustomLayout(customLayout)
+            val useConfiguredCommands = isMediaNotificationController ||
+                isAutomotiveController || isAutoCompanionController
+            val connection = MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+            if (useConfiguredCommands) {
+                connection.setCustomLayout(customLayout)
                     .setAvailableSessionCommands(
                         sessionCommands
                             ?: MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
                     )
-                    .setAvailablePlayerCommands(
-                        playerCommands ?: MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
-                    )
-                    .build()
-            } else {
-                super.onConnect(session, controller)
             }
+            val allowedPlayerCommands = if (useConfiguredCommands) {
+                playerCommands ?: MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
+            } else {
+                MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
+            }
+            return connection.setAvailablePlayerCommands(
+                allowedPlayerCommands.buildUpon()
+                    .removeAll(Player.COMMAND_SET_MEDIA_ITEM, Player.COMMAND_CHANGE_MEDIA_ITEMS)
+                    .build()
+            ).build()
         }
 
         override fun onCustomCommand(

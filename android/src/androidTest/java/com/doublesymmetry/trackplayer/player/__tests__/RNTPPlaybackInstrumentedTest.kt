@@ -3,6 +3,9 @@ package com.doublesymmetry.trackplayer.player
 import android.content.Context
 import android.os.Bundle
 import androidx.media3.common.Player
+import androidx.media3.session.MediaController
+import androidx.media3.session.MediaSession
+import com.google.common.util.concurrent.ListenableFuture
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.doublesymmetry.trackplayer.model.State
@@ -59,6 +62,73 @@ class RNTPPlaybackInstrumentedTest {
             assertTrue(events.none { it is RNTPPlaybackEvent.Error })
         } finally {
             instrumentation.runOnMainSync { controller?.release() }
+            audioFile.delete()
+        }
+    }
+
+    @Test
+    fun sessionControllerObservesPlayingAndPausedStateAcrossPlaylistChanges() {
+        val audioFile = createWaveFile()
+        val playing = CountDownLatch(1)
+        val paused = CountDownLatch(1)
+        var playback: RNTPPlaybackController? = null
+        var session: MediaSession? = null
+        var connection: ListenableFuture<MediaController>? = null
+        try {
+            instrumentation.runOnMainSync {
+                val configured = RNTPPlaybackController(context, PlaybackOptions(handleAudioFocus = false), {})
+                playback = configured
+                val mediaSession = MediaSession.Builder(context, configured.sessionPlayer)
+                    .setId("rntp-listener-regression")
+                    .setCallback(object : MediaSession.Callback {
+                        override fun onConnect(
+                            session: MediaSession,
+                            controller: MediaSession.ControllerInfo,
+                        ): MediaSession.ConnectionResult =
+                            MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                                .setAvailablePlayerCommands(
+                                    MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                                        .removeAll(Player.COMMAND_SET_MEDIA_ITEM, Player.COMMAND_CHANGE_MEDIA_ITEMS)
+                                        .build()
+                                ).build()
+                    }).build()
+                session = mediaSession
+                connection = MediaController.Builder(context, mediaSession.token).buildAsync()
+            }
+            val remote = checkNotNull(connection).get(10, TimeUnit.SECONDS)
+            instrumentation.runOnMainSync {
+                remote.addListener(object : Player.Listener {
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        if (isPlaying) playing.countDown() else if (playing.count == 0L) paused.countDown()
+                    }
+                })
+                val configured = checkNotNull(playback)
+                configured.transportPlayer.repeatMode = Player.REPEAT_MODE_ONE
+                configured.addTracks(listOf(track("A", audioFile)))
+                configured.transportPlayer.play()
+            }
+            assertTrue("MediaSession controller must observe actual playback", playing.await(20, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                assertTrue(remote.isPlaying)
+                assertEquals(Player.STATE_READY, remote.playbackState)
+                assertFalse(remote.isCommandAvailable(Player.COMMAND_SET_MEDIA_ITEM))
+                assertFalse(remote.isCommandAvailable(Player.COMMAND_CHANGE_MEDIA_ITEMS))
+                val configured = checkNotNull(playback)
+                configured.addTracks(listOf(track("B", audioFile)))
+                configured.transportPlayer.pause()
+            }
+            assertTrue("MediaSession controller must observe the pause", paused.await(10, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                assertFalse(remote.isPlaying)
+                assertFalse(remote.isCommandAvailable(Player.COMMAND_SET_MEDIA_ITEM))
+                assertFalse(remote.isCommandAvailable(Player.COMMAND_CHANGE_MEDIA_ITEMS))
+            }
+        } finally {
+            instrumentation.runOnMainSync {
+                connection?.let(MediaController::releaseFuture)
+                session?.release()
+                playback?.release()
+            }
             audioFile.delete()
         }
     }
