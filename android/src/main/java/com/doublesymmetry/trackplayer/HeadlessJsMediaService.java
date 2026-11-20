@@ -76,20 +76,26 @@
    public int onStartCommand(Intent intent, int flags, int startId) {
        super.onStartCommand(intent, flags, startId);
        logDebug("onStartCommand: flags=" + flags + ", startId=" + startId + ", intent=" + intent);
+       if (startTaskIfNeeded(intent)) {
+           return START_REDELIVER_INTENT;
+       }
+       return START_NOT_STICKY;
+   }
+
+   protected final boolean startTaskIfNeeded(@Nullable Intent intent) {
        HeadlessJsTaskConfig taskConfig = getTaskConfig(intent);
        if (!initialized && taskConfig != null) {
-           // HACK: ensure headlessJsMediaService tasks are only registered once.
            initialized = true;
            logDebug("Starting headless task: " + taskConfig.getTaskKey());
            startTask(taskConfig);
-           return START_REDELIVER_INTENT;
+           return true;
        }
       if (taskConfig == null) {
           logWarning("No task config for intent; service will not start task.");
       } else if (initialized) {
           logWarning("Task already initialized; ignoring new task config.");
       }
-       return START_NOT_STICKY;
+       return false;
    }
  
    /**

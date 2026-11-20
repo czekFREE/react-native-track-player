@@ -4,9 +4,12 @@
  */
 package com.doublesymmetry.trackplayer.player
 
+import androidx.annotation.OptIn
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 
+@OptIn(UnstableApi::class)
 internal class RNTPRemotePlayer(
     player: Player,
     private val onRemote: (RNTPPlaybackEvent.Remote) -> Unit,

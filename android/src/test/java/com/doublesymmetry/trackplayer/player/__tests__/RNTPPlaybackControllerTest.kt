@@ -135,6 +135,50 @@ class RNTPPlaybackControllerTest {
     }
 
     @Test
+    fun replacingTheQueuePreservesPlayingAndPausedIntent() {
+        for (playWhenReady in listOf(true, false)) {
+            controller.addTracks(listOf(track("original")))
+            controller.transportPlayer.playWhenReady = playWhenReady
+
+            controller.transportPlayer.clearMediaItems()
+            controller.addTracks(listOf(track("replacement")))
+
+            assertEquals(listOf("replacement"), order())
+            assertEquals(playWhenReady, controller.transportPlayer.playWhenReady)
+        }
+    }
+
+    @Test
+    fun repeatedSingleItemQueueSkipsAndInitialPositionPreservePlaybackIntent() {
+        controller.addTracks(listOf(track("only")))
+        controller.transportPlayer.repeatMode = Player.REPEAT_MODE_ALL
+        for (playWhenReady in listOf(true, false)) {
+            controller.transportPlayer.playWhenReady = playWhenReady
+
+            repeat(2) { controller.transportPlayer.seekToNextMediaItem() }
+            controller.transportPlayer.seekTo(8_000)
+            controller.transportPlayer.prepare()
+
+            assertEquals("only", controller.currentTrack?.originalItem?.getString("mediaId"))
+            assertEquals(playWhenReady, controller.transportPlayer.playWhenReady)
+            assertEquals(8_000L, controller.position)
+        }
+    }
+
+    @Test
+    fun stopThenClearAndReloadCannotRestoreOldPlaybackIntent() {
+        controller.addTracks(listOf(track("original")))
+        controller.transportPlayer.playWhenReady = true
+
+        controller.stop()
+        controller.transportPlayer.clearMediaItems()
+        controller.addTracks(listOf(track("replacement")))
+
+        assertEquals(listOf("replacement"), order())
+        assertFalse(controller.transportPlayer.playWhenReady)
+    }
+
+    @Test
     fun conversionRetainsRequestOptionsAndPublicIdentity() {
         val track = track("public")
         track.headers = hashMapOf("X-Test" to "first")

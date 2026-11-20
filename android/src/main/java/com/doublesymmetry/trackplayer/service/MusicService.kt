@@ -30,6 +30,7 @@ import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionCommands
+import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.doublesymmetry.trackplayer.model.Capability
 import com.doublesymmetry.trackplayer.model.CustomCommandButton
@@ -245,6 +246,7 @@ class MusicService : HeadlessJsMediaService() {
         mediaSession.setPlayer(player.sessionPlayer)
         fakePlayer?.release()
         fakePlayer = null
+        startTaskIfNeeded(null)
     }
 
     @MainThread
@@ -870,7 +872,7 @@ class MusicService : HeadlessJsMediaService() {
 
             if (parentId != ANDROID_AUTO_ROOT_ID) {
                 return Futures.immediateFuture(
-                    LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE, params)
+                    LibraryResult.ofError(SessionError.ERROR_BAD_VALUE, params)
                 )
             }
 
@@ -894,7 +896,7 @@ class MusicService : HeadlessJsMediaService() {
 
             return Futures.immediateFuture(
                 item?.let { LibraryResult.ofItem(it, null) }
-                    ?: LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE)
+                    ?: LibraryResult.ofError(SessionError.ERROR_BAD_VALUE)
             )
         }
 

@@ -1,21 +1,38 @@
 package com.doublesymmetry.trackplayer.player
 
 import androidx.media3.common.C
-import androidx.media3.common.Timeline
+import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.analytics.PlayerId
 import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.test.utils.FakeTimeline
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
+import org.robolectric.ParameterizedRobolectricTestRunner
 import org.robolectric.annotation.Config
 
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [28])
-class CreateLoadControlTest {
+@RunWith(ParameterizedRobolectricTestRunner::class)
+@Config(sdk = [24, 28])
+class CreateLoadControlTest(mediaUri: String) {
+    private val timeline = FakeTimeline(
+        FakeTimeline.TimelineWindowDefinition.Builder()
+            .setMediaItem(MediaItem.fromUri(mediaUri))
+            .setDurationUs(60_000_000)
+            .build()
+    )
+
+    companion object {
+        @JvmStatic
+        @ParameterizedRobolectricTestRunner.Parameters(name = "{0}")
+        fun sources() = listOf(
+            arrayOf("https://example.invalid/fixture.wav"),
+            arrayOf("file:///fixture.wav"),
+        )
+    }
+
     @Test
-    fun `omitted and zero buffers keep Media3 1_8 defaults`() {
+    fun `omitted and zero buffers retain playback and rebuffer thresholds`() {
         listOf(
             BufferOptions(null, null, null, null),
             BufferOptions(0, 0, 0, 0),
@@ -59,8 +76,8 @@ class CreateLoadControlTest {
 
     private fun parameters(bufferedMs: Long, rebuffering: Boolean = false) = LoadControl.Parameters(
         PlayerId.UNSET,
-        Timeline.EMPTY,
-        MediaSource.MediaPeriodId("fixture"),
+        timeline,
+        MediaSource.MediaPeriodId(timeline.getUidOfPeriod(0)),
         0L,
         bufferedMs * 1000,
         1f,

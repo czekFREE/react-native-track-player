@@ -9,7 +9,7 @@ buildscript {
   }
 
   dependencies {
-    classpath "com.android.tools.build:gradle:8.7.2"
+    classpath "com.android.tools.build:gradle:8.12.0"
     // noinspection DifferentKotlinGradleVersion
     classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${getExtOrDefault('kotlinVersion')}"
   }
@@ -86,6 +86,8 @@ repositories {
 }
 
 def kotlin_version = getExtOrDefault("kotlinVersion")
+def media3Version = "1.11.1"
+def coroutinesVersion = "1.10.2"
 
 dependencies {
   implementation "com.facebook.react:react-android"
@@ -93,38 +95,33 @@ dependencies {
 
   // Make sure we're using androidx
   implementation "androidx.core:core-ktx:1.13.1"
-  implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
   implementation "androidx.lifecycle:lifecycle-process:2.8.6"
   implementation 'androidx.media:media:1.7.0'
 
   implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
-  implementation("androidx.activity:activity-compose:1.9.3")
-  implementation("androidx.compose.ui:ui")
-  implementation("androidx.compose.ui:ui-graphics")
 
-  implementation("androidx.media3:media3-exoplayer:1.8.0")
-  implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
-  implementation("androidx.media3:media3-exoplayer-dash:1.8.0")
-  implementation("androidx.media3:media3-exoplayer-smoothstreaming:1.8.0")
-  implementation("androidx.media3:media3-session:1.8.0")
-  implementation("androidx.media3:media3-ui:1.8.0")
-  implementation("androidx.media3:media3-common:1.8.0")
+  implementation("androidx.media3:media3-exoplayer:$media3Version")
+  implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
+  implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
+  implementation("androidx.media3:media3-exoplayer-smoothstreaming:$media3Version")
+  implementation("androidx.media3:media3-session:$media3Version")
+  implementation("androidx.media3:media3-ui:$media3Version")
+  implementation("androidx.media3:media3-common:$media3Version")
 
-  implementation "com.google.guava:guava:33.0.0-android"
-  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.0"
-  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
-  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+  implementation "com.google.guava:guava:33.8.0-android"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-guava:$coroutinesVersion"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion"
+  implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
 
-  implementation 'io.coil-kt:coil:2.4.0'
+  implementation 'io.coil-kt:coil:2.7.0'
   api 'com.jakewharton.timber:timber:5.0.1'
 
-  implementation 'androidx.test:rules:1.6.1'
   implementation 'jp.wasabeef.transformers:coil:1.0.6'
 
   testImplementation 'junit:junit:4.13.2'
   testImplementation 'org.robolectric:robolectric:4.18'
   testImplementation 'androidx.test:core:1.7.0'
-  testImplementation 'androidx.media3:media3-test-utils:1.8.0'
+  testImplementation "androidx.media3:media3-test-utils:$media3Version"
   testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
   androidTestImplementation 'androidx.test.ext:junit:1.3.0'
   androidTestImplementation 'androidx.test:runner:1.7.0'
