@@ -11,51 +11,61 @@ import MediaPlayer
 import SwiftAudioEx
 
 struct Metadata {
-    private static var currentImageTask: URLSessionDataTask?
-
-    static func update(for player: AudioPlayer, with metadata: [String: Any]) {
-        currentImageTask?.cancel()
+    static func update(
+        for player: AudioPlayer,
+        with metadata: [String: Any],
+        urlSession: URLSession = .shared
+    ) {
         var ret: [NowPlayingInfoKeyValue] = []
         
         if let title = metadata["title"] as? String {
             ret.append(MediaItemProperty.title(title))
+        } else if metadata["title"] is NSNull {
+            ret.append(MediaItemProperty.title(nil))
         }
         
         if let artist = metadata["artist"] as? String {
             ret.append(MediaItemProperty.artist(artist))
+        } else if metadata["artist"] is NSNull {
+            ret.append(MediaItemProperty.artist(nil))
         }
         
         if let album = metadata["album"] as? String {
             ret.append(MediaItemProperty.albumTitle(album))
+        } else if metadata["album"] is NSNull {
+            ret.append(MediaItemProperty.albumTitle(nil))
         }
         
         if let duration = metadata["duration"] as? Double {
             ret.append(MediaItemProperty.duration(duration))
+        } else if metadata["duration"] is NSNull {
+            ret.append(MediaItemProperty.duration(nil))
         }
         
         if let elapsedTime = metadata["elapsedTime"] as? Double {
             ret.append(NowPlayingInfoProperty.elapsedPlaybackTime(elapsedTime))
+        } else if metadata["elapsedTime"] is NSNull {
+            ret.append(NowPlayingInfoProperty.elapsedPlaybackTime(nil))
         }
 
         if let isLiveStream = metadata["isLiveStream"] as? Bool {
             ret.append(NowPlayingInfoProperty.isLiveStream(isLiveStream))
+        } else if metadata["isLiveStream"] is NSNull {
+            ret.append(NowPlayingInfoProperty.isLiveStream(nil))
         }
         
         player.nowPlayingInfoController.set(keyValues: ret)
-        
-        if let artworkURL = MediaURL(object: metadata["artwork"]) {
-            currentImageTask = URLSession.shared.dataTask(with: artworkURL.value, completionHandler: { [weak player] (data, _, error) in
-                if let data = data, let image = UIImage(data: data), error == nil {
-                    let artwork = MPMediaItemArtwork(boundsSize: image.size, requestHandler: { (size) -> UIImage in
-                        return image
-                    })
-                    player?.nowPlayingInfoController.set(keyValue: MediaItemProperty.artwork(artwork))
-                }
-            })
-            
-            currentImageTask?.resume()
+
+        guard let artwork = metadata["artwork"] else { return }
+
+        guard !(artwork is NSNull), let artworkURL = MediaURL(object: artwork) else {
+            player.loadArtwork { $0(nil) }
+            return
+        }
+        if artworkURL.isLocal {
+            player.loadArtwork { $0(UIImage(contentsOfFile: artworkURL.value.path)) }
         } else {
-            player.nowPlayingInfoController.set(keyValue: MediaItemProperty.artwork(nil))
+            player.loadArtwork(from: artworkURL.value, urlSession: urlSession)
         }
     }
 }

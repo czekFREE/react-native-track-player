@@ -20,8 +20,13 @@ protocol AVPlayerWrapperDelegate: AnyObject {
     func AVWrapper(didReceiveChapterMetadata metadata: [AVTimedMetadataGroup])
     func AVWrapper(didReceiveTimedMetadata metadata: [AVTimedMetadataGroup])
     func AVWrapper(didChangePlayWhenReady playWhenReady: Bool)
+    func AVWrapper(didInstallItem item: AVPlayerItem)
     func AVWrapperItemDidPlayToEndTime()
     func AVWrapperItemFailedToPlayToEndTime()
     func AVWrapperItemPlaybackStalled()
     func AVWrapperDidRecreateAVPlayer()
+}
+
+extension AVPlayerWrapperDelegate {
+    func AVWrapper(didInstallItem item: AVPlayerItem) {}
 }

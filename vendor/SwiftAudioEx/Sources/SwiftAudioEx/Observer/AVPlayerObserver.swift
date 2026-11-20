@@ -9,6 +9,112 @@
 import Foundation
 import AVFoundation
 
+final class AVPlayerEventRevision {
+    private let lock = NSLock()
+    private var value = UUID()
+
+    var current: UUID {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func advance() {
+        lock.lock()
+        value = UUID()
+        lock.unlock()
+    }
+}
+
+final class AVPlayerTransportIntent {
+    struct Snapshot {
+        var sourceRevision = UUID()
+        var commandRevision = UUID()
+        var playWhenReady = false
+        var automaticallyPausesOnRouteLoss = true
+        var itemIdentifier: ObjectIdentifier?
+        var hasAcceptedPlayback = false
+
+        func accepts(_ status: AVPlayer.TimeControlStatus, observed: Snapshot) -> Bool {
+            guard sourceRevision == observed.sourceRevision else { return false }
+            if commandRevision == observed.commandRevision { return true }
+            switch status {
+            case .paused: return !playWhenReady
+            case .playing, .waitingToPlayAtSpecifiedRate: return playWhenReady
+            @unknown default: return false
+            }
+        }
+    }
+
+    private let lock = NSLock()
+    private var snapshot = Snapshot()
+    private var hostPlaybackPermission: (() -> Bool)?
+
+    var current: Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshot
+    }
+
+    var playbackPermission: (() -> Bool)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return hostPlaybackPermission
+        }
+        set {
+            lock.lock()
+            let previous = hostPlaybackPermission
+            hostPlaybackPermission = newValue
+            lock.unlock()
+            withExtendedLifetime(previous) {}
+        }
+    }
+
+    func update(playWhenReady: Bool) {
+        lock.lock()
+        snapshot.commandRevision = UUID()
+        snapshot.playWhenReady = playWhenReady
+        lock.unlock()
+    }
+
+    func setAutomaticallyPausesOnRouteLoss(_ enabled: Bool) {
+        lock.lock()
+        snapshot.automaticallyPausesOnRouteLoss = enabled
+        lock.unlock()
+    }
+
+    func retireSource() {
+        lock.lock()
+        snapshot.sourceRevision = UUID()
+        snapshot.itemIdentifier = nil
+        snapshot.hasAcceptedPlayback = false
+        lock.unlock()
+    }
+
+    func bind(item: AVPlayerItem) -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        snapshot.itemIdentifier = ObjectIdentifier(item)
+        snapshot.hasAcceptedPlayback = false
+        return snapshot
+    }
+
+    func recordPlaybackAcceptance(
+        status: AVPlayer.TimeControlStatus, item: AVPlayerItem?, observed: Snapshot
+    ) {
+        guard status == .waitingToPlayAtSpecifiedRate || status == .playing,
+            let item = item else { return }
+        let itemIdentifier = ObjectIdentifier(item)
+        lock.lock()
+        defer { lock.unlock() }
+        guard snapshot.sourceRevision == observed.sourceRevision,
+            snapshot.itemIdentifier == itemIdentifier,
+            observed.itemIdentifier == itemIdentifier else { return }
+        snapshot.hasAcceptedPlayback = true
+    }
+}
+
 protocol AVPlayerObserverDelegate: AnyObject {
     
     /**
@@ -28,7 +134,7 @@ protocol AVPlayerObserverDelegate: AnyObject {
 class AVPlayerObserver: NSObject {
 
     private static var context = 0
-    private let main: DispatchQueue = .main
+    private let transportIntent: AVPlayerTransportIntent
 
     private struct AVPlayerKeyPath {
         static let status = #keyPath(AVPlayer.status)
@@ -46,6 +152,11 @@ class AVPlayerObserver: NSObject {
         }
     }
 
+    init(transportIntent: AVPlayerTransportIntent = AVPlayerTransportIntent()) {
+        self.transportIntent = transportIntent
+        super.init()
+    }
+
     deinit {
         stopObserving()
     }
@@ -61,14 +172,14 @@ class AVPlayerObserver: NSObject {
         isObserving = true
         player.addObserver(
             self,
-            forKeyPath: AVPlayerKeyPath.status,
-            options: statusChangeOptions,
+            forKeyPath: AVPlayerKeyPath.timeControlStatus,
+            options: timeControlStatusChangeOptions,
             context: &AVPlayerObserver.context
         )
         player.addObserver(
             self,
-            forKeyPath: AVPlayerKeyPath.timeControlStatus,
-            options: timeControlStatusChangeOptions,
+            forKeyPath: AVPlayerKeyPath.status,
+            options: statusChangeOptions,
             context: &AVPlayerObserver.context
         )
     }
@@ -88,33 +199,37 @@ class AVPlayerObserver: NSObject {
             return
         }
 
-        switch observedKeyPath {
-        case AVPlayerKeyPath.status:
-            handleStatusChange(change)
-
-        case AVPlayerKeyPath.timeControlStatus:
-            handleTimeControlStatusChange(change)
-
-        default:
-            break
+        guard let observedPlayer = object as? AVPlayer else { return }
+        let observedIntent = transportIntent.current
+        let item = observedPlayer.currentItem
+        if observedKeyPath == AVPlayerKeyPath.timeControlStatus,
+            let number = change?[.newKey] as? NSNumber,
+            let status = AVPlayer.TimeControlStatus(rawValue: number.intValue) {
+            transportIntent.recordPlaybackAcceptance(
+                status: status, item: item, observed: observedIntent
+            )
         }
-    }
-
-    private func handleStatusChange(_ change: [NSKeyValueChangeKey: Any]?) {
-        let status: AVPlayer.Status
-        if let statusNumber = change?[.newKey] as? NSNumber {
-            status = AVPlayer.Status(rawValue: statusNumber.intValue)!
-        } else {
-            status = .unknown
+        let deliver = { [weak self, weak observedPlayer] in
+            guard let self = self, let observedPlayer = observedPlayer, self.isObserving,
+                self.player === observedPlayer, observedPlayer.currentItem === item
+            else { return }
+            switch observedKeyPath {
+            case AVPlayerKeyPath.status:
+                if let number = change?[.newKey] as? NSNumber,
+                    let status = AVPlayer.Status(rawValue: number.intValue) {
+                    self.delegate?.player(statusDidChange: status)
+                }
+            case AVPlayerKeyPath.timeControlStatus:
+                if let number = change?[.newKey] as? NSNumber,
+                    let status = AVPlayer.TimeControlStatus(rawValue: number.intValue),
+                    self.transportIntent.current.accepts(status, observed: observedIntent),
+                    (status != .paused || observedPlayer.rate == 0),
+                    observedPlayer.timeControlStatus == status {
+                    self.delegate?.player(didChangeTimeControlStatus: status)
+                }
+            default: break
+            }
         }
-        delegate?.player(statusDidChange: status)
-    }
-
-    private func handleTimeControlStatusChange(_ change: [NSKeyValueChangeKey: Any]?) {
-        let status: AVPlayer.TimeControlStatus
-        if let statusNumber = change?[.newKey] as? NSNumber {
-            status = AVPlayer.TimeControlStatus(rawValue: statusNumber.intValue)!
-            delegate?.player(didChangeTimeControlStatus: status)
-        }
+        if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
     }
 }

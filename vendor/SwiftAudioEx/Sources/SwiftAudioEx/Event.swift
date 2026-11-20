@@ -110,18 +110,18 @@ extension AudioPlayer {
     
     class Invoker<EventData> {
         
-        // Signals false if the listener object is nil
-        let invoke: (EventData) -> Bool
+        let invoke: EventClosure<EventData>
         weak var listener: AnyObject?
+        let onMainQueue: Bool
         
-        init<Listener: AnyObject>(listener: Listener, closure: @escaping EventClosure<EventData>) {
+        init<Listener: AnyObject>(listener: Listener, onMainQueue: Bool, closure: @escaping EventClosure<EventData>) {
             self.listener = listener
+            self.onMainQueue = onMainQueue
             invoke = { [weak listener] (data: EventData) in
                 guard let _ = listener else {
-                    return false
+                    return
                 }
                 closure(data)
-                return true
             }
         }
         
@@ -129,25 +129,71 @@ extension AudioPlayer {
     
     public class Event<EventData> {
         private let queue: DispatchQueue = DispatchQueue(label: "com.swiftAudioEx.eventQueue")
-        var invokers: [Invoker<EventData>] = []
+        private let listenerLock = NSLock()
+        private var invokers: [Invoker<EventData>] = []
+        private var pendingMainDeliveries: [() -> Void] = []
+        private var isDeliveringMainEvents = false
         
         public func addListener<Listener: AnyObject>(_ listener: Listener, _ closure: @escaping EventClosure<EventData>) {
-            queue.async {
-                self.invokers.append(Invoker(listener: listener, closure: closure))
-            }
+            addListener(listener, onMainQueue: false, closure)
+        }
+
+        public func addListener<Listener: AnyObject>(_ listener: Listener, onMainQueue: Bool, _ closure: @escaping EventClosure<EventData>) {
+            listenerLock.lock()
+            invokers.append(Invoker(listener: listener, onMainQueue: onMainQueue, closure: closure))
+            listenerLock.unlock()
         }
         
         public func removeListener(_ listener: AnyObject) {
-            queue.async {
-                self.invokers = self.invokers.filter({ (invoker) -> Bool in
-                    return invoker.listener !== listener
-                })
-            }
+            listenerLock.lock()
+            let previousInvokers = invokers
+            invokers = previousInvokers.filter { $0.listener !== listener }
+            listenerLock.unlock()
+            withExtendedLifetime(previousInvokers) {}
         }
         
         func emit(data: EventData) {
-            queue.async {
-                self.invokers = self.invokers.filter { $0.invoke(data) }
+            listenerLock.lock()
+            let previousInvokers = invokers
+            let currentInvokers = previousInvokers.filter { $0.listener != nil }
+            invokers = currentInvokers
+            let mainInvokers = currentInvokers.filter { $0.onMainQueue }
+            if !mainInvokers.isEmpty {
+                pendingMainDeliveries.append {
+                    for invoker in mainInvokers { invoker.invoke(data) }
+                }
+            }
+            listenerLock.unlock()
+            withExtendedLifetime(previousInvokers) {}
+
+            let asynchronousInvokers = currentInvokers.filter { !$0.onMainQueue }
+            if !asynchronousInvokers.isEmpty {
+                queue.async {
+                    for invoker in asynchronousInvokers { invoker.invoke(data) }
+                }
+            }
+
+            guard !mainInvokers.isEmpty else { return }
+            if Thread.isMainThread {
+                deliverPendingMainEvents()
+            } else {
+                DispatchQueue.main.async { self.deliverPendingMainEvents() }
+            }
+        }
+
+        private func deliverPendingMainEvents() {
+            guard !isDeliveringMainEvents else { return }
+            isDeliveringMainEvents = true
+            defer { isDeliveringMainEvents = false }
+
+            while true {
+                listenerLock.lock()
+                let deliveries = pendingMainDeliveries
+                pendingMainDeliveries.removeAll()
+                listenerLock.unlock()
+
+                guard !deliveries.isEmpty else { return }
+                for deliver in deliveries { deliver() }
             }
         }
     }

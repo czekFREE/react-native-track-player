@@ -48,6 +48,8 @@ Not sure where to start?
 2. Peruse the [API Docs](https://doublesymmetry.github.io/react-native-track-player/docs/api/events).
 3. Run the [Example Project](/example).
 
+Installing this fork in another iOS app requires the [vendored SwiftAudioEx Podfile entry](vendor/SwiftAudioEx/README.md).
+
 ## Commerical Usage
 
 **Are you using RNTP for a personal project?** Great! Sponsor us if you're able but otherwise you can support us by reporting any bugs you find, sending us screenshots of your projects and starring us on Github 🌟

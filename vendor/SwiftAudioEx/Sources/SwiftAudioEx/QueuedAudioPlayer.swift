@@ -15,6 +15,8 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
     let queue: QueueManager = QueueManager<AudioItem>()
     fileprivate var lastIndex: Int = -1
     fileprivate var lastItem: AudioItem? = nil
+    private var currentItemChangeRevision: UInt = 0
+    private var repeatCancellationRevision: UInt = 0
 
     public override init(nowPlayingInfoController: NowPlayingInfoControllerProtocol = NowPlayingInfoController(), remoteCommandController: RemoteCommandController = RemoteCommandController()) {
         super.init(nowPlayingInfoController: nowPlayingInfoController, remoteCommandController: remoteCommandController)
@@ -22,7 +24,13 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
     }
 
     /// The repeat mode for the queue player.
-    public var repeatMode: RepeatMode = .off
+    public var repeatMode: RepeatMode = .off {
+        didSet {
+            if oldValue != repeatMode && !repeatsCurrentItem {
+                repeatCancellationRevision &+= 1
+            }
+        }
+    }
 
     public override var currentItem: AudioItem? {
         queue.current
@@ -36,8 +44,11 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
     }
 
     override public func clear() {
+        let hadCurrentItem = currentIndex != -1
         queue.clearQueue()
-        super.clear()
+        if !hadCurrentItem {
+            super.clear()
+        }
     }
 
     /**
@@ -99,6 +110,7 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
 
     public func add(items: [AudioItem], at index: Int) throws {
         try queue.add(items, at: index)
+        lastIndex = currentIndex
     }
 
     /**
@@ -133,6 +145,7 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
      */
     public func removeItem(at index: Int) throws {
         try queue.removeItem(at: index)
+        lastIndex = currentIndex
     }
 
 
@@ -163,6 +176,7 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
      */
     public func moveItem(fromIndex: Int, toIndex: Int) throws {
         try queue.moveItem(fromIndex: fromIndex, toIndex: toIndex)
+        lastIndex = currentIndex
     }
 
     /**
@@ -177,60 +191,85 @@ public class QueuedAudioPlayer: AudioPlayer, QueueManagerDelegate {
      */
     public func removePreviousItems() {
         queue.removePreviousItems()
+        lastIndex = currentIndex
     }
 
-    func replay() {
-        seek(to: 0);
-        play()
+    private var repeatsCurrentItem: Bool {
+        repeatMode == .track || (repeatMode == .queue && items.count == 1)
+    }
+
+    private func replay(repeatCancellationRevision: UInt?) {
+        invalidatePendingReplay()
+        let revision = playbackCommandRevision
+        wrapper.seek(
+            to: 0,
+            shouldResumePlayback: { [weak self] in
+                guard let self = self, self.playbackCommandRevision == revision else { return false }
+                return repeatCancellationRevision == nil
+                    || self.repeatCancellationRevision == repeatCancellationRevision
+            },
+            completionHandler: nil
+        )
     }
 
     // MARK: - AVPlayerWrapperDelegate
 
     override func AVWrapperItemDidPlayToEndTime() {
+        let revision = playbackCommandRevision
+        let observedRepeatMode = repeatMode
+        let observedRepeatCancellationRevision = repeatCancellationRevision
+        let wasRepeatingCurrentItem = repeatsCurrentItem
         event.playbackEnd.emit(data: .playedUntilEnd)
-        if (repeatMode == .track) {
-            self.pause()
-
-            // quick workaround for race condition - schedule a call after 2 frames
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.016 * 2) { [weak self] in self?.replay() }
-        } else if (repeatMode == .queue) {
-            _ = queue.next(wrap: true)
-        } else if (currentIndex != items.count - 1) {
-            _ = queue.next(wrap: false)
-        } else {
+        guard playbackCommandRevision == revision,
+            repeatCancellationRevision == observedRepeatCancellationRevision else { return }
+        let repeatsCurrentItem = self.repeatsCurrentItem
+        guard repeatMode == observedRepeatMode || (wasRepeatingCurrentItem && repeatsCurrentItem) else { return }
+        if repeatMode == .off && currentIndex == items.count - 1 {
             wrapper.state = .ended
+            return
+        }
+
+        guard playWhenReady else { return }
+        if repeatsCurrentItem {
+            guard repeatMode == .track || wrapper.playbackActive else { return }
+            replay(repeatCancellationRevision: observedRepeatCancellationRevision)
+        } else {
+            _ = queue.next(wrap: repeatMode == .queue)
         }
     }
 
     // MARK: - QueueManagerDelegate
 
     func onCurrentItemChanged() {
+        currentItemChangeRevision &+= 1
+        let revision = currentItemChangeRevision
+        let item = currentItem
+        let previousItem = lastItem
+        let previousIndex = lastIndex
         let lastPosition = currentTime;
-        if let currentItem = currentItem {
-            super.load(item: currentItem)
+        if let item = item {
+            super.load(item: item)
         } else {
             super.clear()
         }
+        guard currentItemChangeRevision == revision else { return }
+        let index = currentIndex
+        lastItem = item
+        lastIndex = index
         event.currentItem.emit(
             data: (
-                item: currentItem,
-                index: currentIndex == -1 ? nil : currentIndex,
-                lastItem: lastItem,
-                lastIndex: lastIndex == -1 ? nil : lastIndex,
+                item: item,
+                index: index == -1 ? nil : index,
+                lastItem: previousItem,
+                lastIndex: previousIndex == -1 ? nil : previousIndex,
                 lastPosition: lastPosition
             )
         )
-        lastItem = currentItem
-        lastIndex = currentIndex
     }
 
     func onSkippedToSameCurrentItem() {
         if (wrapper.playbackActive) {
-            replay()
+            replay(repeatCancellationRevision: nil)
         }
-    }
-
-    func onReceivedFirstItem() {
-        try! queue.jump(to: 0)
     }
 }

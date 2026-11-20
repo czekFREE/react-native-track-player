@@ -20,6 +20,10 @@ protocol AVPlayerWrapperProtocol: AnyObject {
     var playbackActive: Bool { get }
     
     var currentTime: TimeInterval { get }
+
+    var pendingSeekPosition: TimeInterval? { get }
+
+    var recoveryPosition: TimeInterval? { get }
     
     var duration: TimeInterval { get }
     
@@ -28,6 +32,8 @@ protocol AVPlayerWrapperProtocol: AnyObject {
     var reasonForWaitingToPlay: AVPlayer.WaitingReason? { get }
     
     var playbackError: AudioPlayerError.PlaybackError? { get }
+
+    var loadRevision: UUID { get }
     
     var rate: Float { get set }
     
@@ -42,6 +48,10 @@ protocol AVPlayerWrapperProtocol: AnyObject {
     var isMuted: Bool { get set }
     
     var automaticallyWaitsToMinimizeStalling: Bool { get set }
+
+    var automaticallyPausesOnRouteLoss: Bool { get set }
+
+    var playbackPermission: (() -> Bool)? { get set }
     
     func play()
     
@@ -51,7 +61,12 @@ protocol AVPlayerWrapperProtocol: AnyObject {
     
     func stop()
     
-    func seek(to seconds: TimeInterval)
+    func seek(to seconds: TimeInterval, completionHandler: ((Bool) -> Void)?)
+
+    func seek(
+        to seconds: TimeInterval, shouldResumePlayback: (() -> Bool)?,
+        completionHandler: ((Bool) -> Void)?
+    )
 
     func seek(by offset: TimeInterval)
 
@@ -64,4 +79,15 @@ protocol AVPlayerWrapperProtocol: AnyObject {
     func unload()
     
     func reload(startFromCurrentTime: Bool)
+}
+
+
+extension AVPlayerWrapperProtocol {
+    var pendingSeekPosition: TimeInterval? { nil }
+
+    var recoveryPosition: TimeInterval? { pendingSeekPosition }
+
+    func seek(to seconds: TimeInterval) {
+        seek(to: seconds, completionHandler: nil)
+    }
 }

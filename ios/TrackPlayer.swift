@@ -23,6 +23,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     // MARK: - Attributes
 
     private var hasInitialized = false
+    private var isReplacingQueue = false
     private(set) var player: QueuedAudioPlayer
     private var ownerGeneration: PlaybackOwnerGeneration
     private let playerFactory: (PlaybackOwnerGeneration) -> QueuedAudioPlayer
@@ -34,9 +35,25 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
             AVAudioSession.CategoryOptions
         ) throws -> Void
     private var mediaServicesResetObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
     private var cachedPosition: Double = 0
     private var cachedPositionTrack: Track?
-    private var pendingSeekPosition: Double?
+    private struct InterruptionResumePermission {
+        let generation: PlaybackOwnerGeneration
+        let track: Track
+    }
+    private enum InterruptionPlaybackIntent {
+        case active(ownershipRevision: UInt64, resumePermission: InterruptionResumePermission?)
+        case superseded
+    }
+    private var interruptionPlaybackIntent: InterruptionPlaybackIntent?
+    private enum RoutePlaybackPermission {
+        case allowed
+        case requiresExplicitPlay(pauseSignalPending: Bool)
+    }
+    private let playbackPermissionLock = NSLock()
+    private var interruptionOwnershipRevision: UInt64 = 0
+    private var routePlaybackPermission = RoutePlaybackPermission.allowed
     private var nowPlayingMetadata: [String: Any] = [:]
     private let audioSessionController = AudioSessionController.shared
     private var shouldEmitProgressEvent: Bool = false
@@ -85,6 +102,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
             activateSession: activateSession, deactivateSession: deactivateSession)
         super.init()
         audioSessionController.delegate = self
+        configureRouteHandling(for: player)
         player.playWhenReady = false
         registerPlayerEvents(player: player, generation: generation)
         mediaServicesResetObserver = notificationCenter.addObserver(
@@ -92,6 +110,19 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in self?.handleMediaServicesReset() }
+        routeChangeObserver = notificationCenter.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil
+        ) { [weak self] notification in
+            guard let self = self,
+                let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                AVAudioSession.RouteChangeReason(rawValue: rawReason) == .oldDeviceUnavailable
+            else { return }
+            self.playbackPermissionLock.lock()
+            self.routePlaybackPermission = .requiresExplicitPlay(pauseSignalPending: true)
+            self.playbackPermissionLock.unlock()
+            let deliver: () -> Void = { [weak self] in self?.applyRouteLoss() }
+            if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
+        }
     }
 
     private static func makePlayer(generation: PlaybackOwnerGeneration) -> QueuedAudioPlayer {
@@ -103,6 +134,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
 
     deinit {
         if let observer = mediaServicesResetObserver { notificationCenter.removeObserver(observer) }
+        if let observer = routeChangeObserver { notificationCenter.removeObserver(observer) }
         let generation = ownerGeneration
         let retiredPlayer = player
         DispatchQueue.main.async {
@@ -118,47 +150,50 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     private func registerPlayerEvents(
         player: QueuedAudioPlayer, generation: PlaybackOwnerGeneration
     ) {
-        player.event.receiveChapterMetadata.addListener(self) { [weak self] metadata in
+        player.event.receiveChapterMetadata.addListener(self, onMainQueue: true) { [weak self] metadata in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerChapterMetadataReceived(metadata: metadata)
             }
         }
-        player.event.receiveTimedMetadata.addListener(self) { [weak self] metadata in
+        player.event.receiveTimedMetadata.addListener(self, onMainQueue: true) { [weak self] metadata in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerTimedMetadataReceived(metadata: metadata)
             }
         }
-        player.event.receiveCommonMetadata.addListener(self) { [weak self] metadata in
+        player.event.receiveCommonMetadata.addListener(self, onMainQueue: true) { [weak self] metadata in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerCommonMetadataReceived(metadata: metadata)
             }
         }
-        player.event.stateChange.addListener(self) { [weak self] state in
+        player.event.stateChange.addListener(self, onMainQueue: true) { [weak self] state in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerStateChange(state: state)
             }
         }
-        player.event.fail.addListener(self) { [weak self] error in
+        player.event.playbackEnd.addListener(self, onMainQueue: true) { [weak self] _ in
+            generation.performOnMainIfCurrent { [weak self] in self?.applyRouteLoss() }
+        }
+        player.event.fail.addListener(self, onMainQueue: true) { [weak self] error in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerFailed(error: error)
             }
         }
-        player.event.currentItem.addListener(self) { [weak self] event in
+        player.event.currentItem.addListener(self, onMainQueue: true) { [weak self] event in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerCurrentItemChange(
                     item: event.item, index: event.index, lastItem: event.lastItem,
                     lastIndex: event.lastIndex, lastPosition: event.lastPosition)
             }
         }
-        player.event.secondElapse.addListener(self) { [weak self] seconds in
+        player.event.secondElapse.addListener(self, onMainQueue: true) { [weak self] seconds in
             generation.performOnMainIfCurrent { [weak self] in
                 self?.handleAudioPlayerSecondElapse(seconds: seconds)
             }
         }
-        player.event.seek.addListener(self) { [weak self] event in
+        player.event.seek.addListener(self, onMainQueue: true) { [weak self] event in
             generation.performOnMainIfCurrent { [weak self] in
-                guard event.didFinish else { return }
-                self?.finishSeeking(to: event.seconds)
+                guard event.didFinish, let self = self else { return }
+                self.cachePosition(self.player.currentTime)
             }
         }
         player.event.playWhenReadyChange.addListener(self) { [weak self] playWhenReady in
@@ -186,39 +221,94 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     // MARK: - AudioSessionControllerDelegate
 
     public func handleInterruption(type: InterruptionType) {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.handleInterruption(type: type) }
-            return
-        }
-        let generation = ownerGeneration
-        generation.performOnMainIfCurrent { [weak self] in
+        let observedOwnershipRevision = currentInterruptionOwnershipRevision
+        let handle: () -> Void = { [weak self] in
             guard let self = self else { return }
-            switch type {
-            case .began:
-                self.playbackSession.invalidateForInterruption()
-                self.emit(event: EventType.RemoteDuck, body: ["paused": true])
-            case .ended(let shouldResume):
-                if self.playbackSession.requiresExplicitPlay {
-                    self.emit(
-                        event: EventType.RemoteDuck, body: ["paused": true, "permanent": false])
+            let generation = self.ownerGeneration
+            generation.performOnMainIfCurrent { [weak self] in
+                guard let self = self else { return }
+                guard observedOwnershipRevision == self.currentInterruptionOwnershipRevision else {
+                    if case .ended = type {
+                        self.emit(event: EventType.RemoteDuck, body: ["paused": false])
+                    }
                     return
                 }
-                if shouldResume {
-                    if self.shouldResumePlaybackAfterInterruptionEnds {
-                        do {
-                            try self.startPlayback(userInitiated: false)
-                        } catch {
-                            self.emitAudioSessionFailure(error)
+                switch type {
+                case .began:
+                    let resumePermission: InterruptionResumePermission?
+                    if self.shouldResumePlaybackAfterInterruptionEnds, self.player.playWhenReady,
+                        let track = self.player.currentItem as? Track
+                    {
+                        resumePermission = InterruptionResumePermission(
+                            generation: generation, track: track)
+                    } else {
+                        resumePermission = nil
+                    }
+                    self.interruptionPlaybackIntent = .active(
+                        ownershipRevision: observedOwnershipRevision,
+                        resumePermission: resumePermission)
+                    self.playbackSession.invalidateForInterruption()
+                    self.emit(event: EventType.RemoteDuck, body: ["paused": true])
+                case .ended(let shouldResume):
+                    self.applyRouteLoss()
+                    let interruptionIntent = self.interruptionPlaybackIntent
+                    self.interruptionPlaybackIntent = nil
+                    let resumePermission: InterruptionResumePermission?
+                    switch interruptionIntent {
+                    case .active(let revision, let permission)?:
+                        guard revision == self.currentInterruptionOwnershipRevision else {
+                            self.emit(event: EventType.RemoteDuck, body: ["paused": false])
                             return
                         }
+                        resumePermission = permission
+                    case .superseded?:
+                        self.emit(event: EventType.RemoteDuck, body: ["paused": false])
+                        return
+                    case nil:
+                        resumePermission = nil
                     }
-                    self.emit(event: EventType.RemoteDuck, body: ["paused": false])
-                } else {
-                    self.emit(
-                        event: EventType.RemoteDuck, body: ["paused": true, "permanent": true])
+                    if self.routeRequiresExplicitPlay {
+                        self.emit(event: EventType.RemoteDuck, body: ["paused": false])
+                        return
+                    }
+                    if self.playbackSession.requiresExplicitPlay {
+                        self.emit(
+                            event: EventType.RemoteDuck, body: ["paused": true, "permanent": false])
+                        return
+                    }
+                    if shouldResume {
+                        if let resumePermission = resumePermission,
+                            resumePermission.generation === generation,
+                            resumePermission.track === self.player.currentItem as? Track
+                        {
+                            do {
+                                try self.startPlayback(userInitiated: false)
+                            } catch {
+                                self.emitAudioSessionFailure(error)
+                                return
+                            }
+                        }
+                        self.emit(event: EventType.RemoteDuck, body: ["paused": false])
+                    } else {
+                        if self.shouldResumePlaybackAfterInterruptionEnds, self.player.playWhenReady,
+                            case .active(let revision, _)? = interruptionIntent
+                        {
+                            self.player.pause()
+                            guard generation.isCurrent else { return }
+                            guard revision == self.currentInterruptionOwnershipRevision,
+                                !self.routeRequiresExplicitPlay
+                            else {
+                                self.emit(event: EventType.RemoteDuck, body: ["paused": false])
+                                return
+                            }
+                        }
+                        self.emit(
+                            event: EventType.RemoteDuck, body: ["paused": true, "permanent": true])
+                    }
                 }
             }
         }
+        if Thread.isMainThread { handle() } else { DispatchQueue.main.async(execute: handle) }
     }
 
     // MARK: - Bridged Methods
@@ -227,6 +317,8 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         let rejected = !hasInitialized;
         if (rejected) {
             reject("player_not_initialized", "The player is not initialized. Call setupPlayer first.", nil)
+        } else {
+            applyRouteLoss()
         }
         return rejected;
     }
@@ -304,10 +396,74 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
             sessionCategory, sessionCategoryMode, sessionCategoryPolicy, sessionCategoryOptions)
     }
 
+    private var routeRequiresExplicitPlay: Bool {
+        playbackPermissionLock.lock()
+        defer { playbackPermissionLock.unlock() }
+        if case .requiresExplicitPlay = routePlaybackPermission { return true }
+        return false
+    }
+
+    private func configureRouteHandling(for player: QueuedAudioPlayer) {
+        player.automaticallyPausesOnRouteLoss = false
+        player.playbackPermission = { [weak self] in self?.routeRequiresExplicitPlay == false }
+    }
+
+    private var currentInterruptionOwnershipRevision: UInt64 {
+        playbackPermissionLock.lock()
+        defer { playbackPermissionLock.unlock() }
+        return interruptionOwnershipRevision
+    }
+
+    private func recordExplicitPlay() {
+        playbackPermissionLock.lock()
+        interruptionOwnershipRevision &+= 1
+        routePlaybackPermission = .allowed
+        playbackPermissionLock.unlock()
+    }
+
+    private func supersedePlaybackInterruption() {
+        playbackPermissionLock.lock()
+        interruptionOwnershipRevision &+= 1
+        playbackPermissionLock.unlock()
+        if interruptionPlaybackIntent != nil { interruptionPlaybackIntent = .superseded }
+    }
+
+    private func applyRouteLoss() {
+        playbackPermissionLock.lock()
+        guard case .requiresExplicitPlay(let pauseSignalPending) = routePlaybackPermission else {
+            playbackPermissionLock.unlock()
+            return
+        }
+        routePlaybackPermission = .requiresExplicitPlay(pauseSignalPending: false)
+        playbackPermissionLock.unlock()
+        guard pauseSignalPending || player.playWhenReady else { return }
+        supersedePlaybackInterruption()
+        player.pause()
+        guard routeRequiresExplicitPlay, pauseSignalPending, hasInitialized else { return }
+        emit(event: EventType.RemotePause)
+    }
+
+    private func requireRoutePlaybackPermission() throws {
+        guard routeRequiresExplicitPlay else { return }
+        applyRouteLoss()
+        guard routeRequiresExplicitPlay else { return }
+        throw AudioSessionPlaybackError(
+            code: "ios_audio_session_requires_explicit_play",
+            underlyingError: NSError(
+                domain: "NativeTrackPlayer", code: 0,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Playback requires a newer explicit Play command after the audio output disconnected."
+                ]))
+    }
+
     private func startPlayback(userInitiated: Bool) throws {
+        supersedePlaybackInterruption()
         do {
+            try requireRoutePlaybackPermission()
             try playbackSession.activate(
                 userInitiated: userInitiated, configureSession: prepareAudioSession)
+            try requireRoutePlaybackPermission()
             player.play()
         } catch {
             player.pause()
@@ -350,25 +506,22 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
 
     private func synchronizeCurrentTrack() {
         guard cachedPositionTrack !== player.currentItem as? Track else { return }
-        pendingSeekPosition = nil
-        cachePosition(0)
+        supersedePlaybackInterruption()
+        cachedPosition = 0
+        cachedPositionTrack = player.currentItem as? Track
         nowPlayingMetadata = [:]
     }
 
     private func cachePosition(_ seconds: Double) {
         guard seconds.isFinite && seconds >= 0 else { return }
-        guard pendingSeekPosition == nil else { return }
+        guard player.pendingSeekPosition == nil else { return }
         cachedPosition = seconds
         cachedPositionTrack = player.currentItem as? Track
     }
 
     private func latestUsablePosition() -> Double {
-        if cachedPositionTrack !== player.currentItem as? Track {
-            cachedPosition = 0
-            pendingSeekPosition = nil
-            cachedPositionTrack = player.currentItem as? Track
-        }
-        if let pendingSeekPosition = pendingSeekPosition { return pendingSeekPosition }
+        synchronizeCurrentTrack()
+        if let recoveryPosition = player.recoveryPosition { return recoveryPosition }
         let currentTime = player.currentTime
         if currentTime.isFinite && currentTime > 0 {
             cachePosition(currentTime)
@@ -376,24 +529,11 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         return cachedPosition
     }
 
-    private func beginSeeking(to seconds: Double) {
-        guard seconds.isFinite && seconds >= 0 else { return }
-        cachedPositionTrack = player.currentItem as? Track
-        pendingSeekPosition = seconds
-    }
-
-    private func finishSeeking(to seconds: Double) {
-        guard let pendingSeekPosition = pendingSeekPosition,
-            abs(pendingSeekPosition - seconds) <= 0.001
-        else { return }
-        self.pendingSeekPosition = nil
-        cachePosition(seconds)
-    }
-
     func handleMediaServicesReset() {
         let snapshot = NativePlayerSnapshot(player: player, position: latestUsablePosition())
         let retiredPlayer = player
         ownerGeneration.invalidate()
+        supersedePlaybackInterruption()
         playbackSession.mediaServicesWereReset()
         retiredPlayer.remoteCommands = []
         retiredPlayer.syncRemoteCommandsWithCommandCenter()
@@ -403,10 +543,10 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         let generation = PlaybackOwnerGeneration()
         ownerGeneration = generation
         player = playerFactory(generation)
+        configureRouteHandling(for: player)
         configureRemoteCommands(player: player, generation: generation)
         do {
             try snapshot.restore(to: player)
-            beginSeeking(to: snapshot.position)
             try playbackSession.configure(prepareAudioSession)
             if !nowPlayingMetadata.isEmpty {
                 Metadata.update(for: player, with: nowPlayingMetadata)
@@ -477,7 +617,9 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         controller.handleTogglePlayPauseCommand = remoteHandler(
             player: player, generation: generation
         ) { owner, player, _ in
-            owner.emit(event: player.playerState == .paused ? .RemotePlay : .RemotePause)
+            let state = player.playerState
+            let shouldPause = player.playWhenReady && state != .paused && state != .ended
+            owner.emit(event: shouldPause ? .RemotePause : .RemotePlay)
             return .success
         }
         controller.handleChangePlaybackPositionCommand = remoteHandler(
@@ -641,7 +783,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
 
         // Sort the indexes in descending order so we can safely remove them one by one
         // without having the next index possibly newly pointing to another item than intended:
-        for index in indexes.sorted().reversed() {
+        for index in Set(indexes).sorted().reversed() {
             try? player.removeItem(at: index)
         }
 
@@ -691,7 +833,8 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         if (rejectWhenNotInitialized(reject: reject)) { return }
 
         logTrackPlayerDevelopment("Skipping to track: \(trackIndex)")
-        try? player.jumpToItem(atIndex: trackIndex, playWhenReady: player.playerState == .playing)
+        try? player.jumpToItem(
+            atIndex: trackIndex, playWhenReady: player.playerState == .ended ? false : nil)
         synchronizeCurrentTrack()
 
         // if an initialTime is passed the seek to it
@@ -744,6 +887,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     public func reset(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
         if (rejectWhenNotInitialized(reject: reject)) { return }
 
+        supersedePlaybackInterruption()
         player.stop()
         player.clear()
         resolve(NSNull())
@@ -779,6 +923,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         userInitiated: Bool, resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
+        if userInitiated { recordExplicitPlay() }
         let resetRevision = playbackSession.captureResetRevision()
         performPlaybackCommand(resetRevision: resetRevision, resolve: resolve, reject: reject) {
             try self.startPlayback(userInitiated: userInitiated)
@@ -789,6 +934,9 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     public func pause(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
         if (rejectWhenNotInitialized(reject: reject)) { return }
 
+        if case .active(let revision, _)? = interruptionPlaybackIntent {
+            interruptionPlaybackIntent = .active(ownershipRevision: revision, resumePermission: nil)
+        }
         player.pause()
         resolve(NSNull())
     }
@@ -798,11 +946,13 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         playWhenReady: Bool, resolve: @escaping RCTPromiseResolveBlock,
         reject: @escaping RCTPromiseRejectBlock
     ) {
+        if playWhenReady { recordExplicitPlay() }
         let resetRevision = playWhenReady ? playbackSession.captureResetRevision() : nil
         performPlaybackCommand(resetRevision: resetRevision, resolve: resolve, reject: reject) {
             if playWhenReady {
                 try self.startPlayback(userInitiated: true)
             } else {
+                self.supersedePlaybackInterruption()
                 self.player.pause()
             }
         }
@@ -818,7 +968,9 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     public func stop(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
         if (rejectWhenNotInitialized(reject: reject)) { return }
 
+        supersedePlaybackInterruption()
         player.stop()
+        cachePosition(player.currentTime)
         resolve(NSNull())
     }
 
@@ -826,7 +978,6 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     public func seekTo(time: Double, resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
         if rejectWhenNotInitialized(reject: reject) { return }
 
-        beginSeeking(to: time)
         player.seek(to: time)
         resolve(NSNull())
     }
@@ -837,8 +988,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     ) {
         if rejectWhenNotInitialized(reject: reject) { return }
 
-        beginSeeking(to: max(0, latestUsablePosition() + offset))
-        player.seek(by: offset)
+        player.seek(to: latestUsablePosition() + offset)
         resolve(NSNull())
     }
 
@@ -932,8 +1082,11 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
 
             tracks.append(track)
         }
+        let wasReplacingQueue = isReplacingQueue
+        isReplacingQueue = wasReplacingQueue || !tracks.isEmpty
         player.clear()
-        try? player.add(items: tracks)
+        isReplacingQueue = wasReplacingQueue
+        player.add(items: tracks)
         synchronizeCurrentTrack()
         resolve(index)
     }
@@ -1017,6 +1170,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
     // MARK: - QueuedAudioPlayer Event Handlers
 
     func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
+        if state == .loading { applyRouteLoss() }
         if player.automaticallyUpdateNowPlayingInfo {
             switch state {
             case .playing:
@@ -1069,7 +1223,8 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
         lastPosition: Double?
     ) {
 
-        if index == player.currentIndex { synchronizeCurrentTrack() }
+        let currentIndex = player.currentIndex
+        if index == (currentIndex == -1 ? nil : currentIndex) { synchronizeCurrentTrack() }
         if let item = item {
             UIApplication.shared.beginReceivingRemoteControlEvents()
             // Update now playing controller with isLiveStream option from track
@@ -1082,7 +1237,7 @@ public class NativeTrackPlayerImpl: NSObject, AudioSessionControllerDelegate {
             UIApplication.shared.endReceivingRemoteControlEvents()
         }
 
-        if (item != nil && lastItem == nil) || item == nil {
+        if (item != nil && lastItem == nil) || (item == nil && !isReplacingQueue) {
             configureAudioSession()
         }
 

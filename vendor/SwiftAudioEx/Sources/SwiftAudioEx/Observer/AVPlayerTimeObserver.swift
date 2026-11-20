@@ -22,6 +22,8 @@ class AVPlayerTimeObserver {
     /// The time to use as start boundary time. Cannot be zero.
     private static let startBoundaryTime: CMTime = CMTime(value: 1, timescale: 1000)
     
+    private var boundaryRevision = UUID()
+    private var periodicRevision = UUID()
     var boundaryTimeStartObserverToken: Any?
     var periodicTimeObserverToken: Any?
     
@@ -61,13 +63,18 @@ class AVPlayerTimeObserver {
             return
         }
         unregisterForBoundaryTimeEvents()
+        let revision = boundaryRevision
+        let item = player.currentItem
         boundaryTimeStartObserverToken = player.addBoundaryTimeObserver(
             forTimes: [AVPlayerTimeObserver.startBoundaryTime].map({
                 NSValue(time: $0)
             }),
-            queue: nil,
-            using: { [weak self] in
-                self?.delegate?.audioDidStart()
+            queue: .main,
+            using: { [weak self, weak player] in
+                guard let self = self, let player = player,
+                    self.player === player, self.boundaryRevision == revision,
+                    item != nil, player.currentItem === item else { return }
+                self.delegate?.audioDidStart()
             }
         )
     }
@@ -76,6 +83,7 @@ class AVPlayerTimeObserver {
      Unregister from the boundary events of the player.
      */
     func unregisterForBoundaryTimeEvents() {
+        boundaryRevision = UUID()
         guard
             let player = player,
             let boundaryTimeStartObserverToken = boundaryTimeStartObserverToken
@@ -93,15 +101,23 @@ class AVPlayerTimeObserver {
             return
         }
         unregisterForPeriodicEvents()
-        periodicTimeObserverToken = player.addPeriodicTimeObserver(forInterval: periodicObserverTimeInterval, queue: nil, using: { (time) in
+        let revision = periodicRevision
+        let item = player.currentItem
+        periodicTimeObserverToken = player.addPeriodicTimeObserver(
+            forInterval: periodicObserverTimeInterval, queue: .main
+        ) { [weak self, weak player] time in
+            guard let self = self, let player = player,
+                self.player === player, self.periodicRevision == revision,
+                item != nil, player.currentItem === item else { return }
             self.delegate?.timeEvent(time: time)
-        })
+        }
     }
     
     /**
      Unregister for periodic events.
      */
     func unregisterForPeriodicEvents() {
+        periodicRevision = UUID()
         guard let player = player, let periodicTimeObserverToken = periodicTimeObserverToken else {
             return
         }

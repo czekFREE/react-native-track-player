@@ -22,11 +22,16 @@ protocol AVPlayerItemNotificationObserverDelegate: AnyObject {
 class AVPlayerItemNotificationObserver {
     
     private let notificationCenter: NotificationCenter = NotificationCenter.default
+    private let timelineEvents: AVPlayerEventRevision
     
     private(set) weak var observingItem: AVPlayerItem?
     weak var delegate: AVPlayerItemNotificationObserverDelegate?
     
     private(set) var isObserving: Bool = false
+
+    init(timelineEvents: AVPlayerEventRevision = AVPlayerEventRevision()) {
+        self.timelineEvents = timelineEvents
+    }
     
     deinit {
         stopObservingCurrentItem()
@@ -88,15 +93,32 @@ class AVPlayerItemNotificationObserver {
         isObserving = false
     }
     
-    @objc private func itemDidPlayToEndTime() {
-        delegate?.itemDidPlayToEndTime()
+    @objc private func itemDidPlayToEndTime(_ notification: Notification) {
+        deliver(notification, requiresCurrentTimeline: true) { $0.itemDidPlayToEndTime() }
     }
 
-    @objc private func itemFailedToPlayToEndTime() {
-        delegate?.itemFailedToPlayToEndTime()
+    @objc private func itemFailedToPlayToEndTime(_ notification: Notification) {
+        deliver(notification, requiresCurrentTimeline: false) { $0.itemFailedToPlayToEndTime() }
     }
 
-    @objc private func itemPlaybackStalled() {
-        delegate?.itemPlaybackStalled()
+    @objc private func itemPlaybackStalled(_ notification: Notification) {
+        deliver(notification, requiresCurrentTimeline: true) { $0.itemPlaybackStalled() }
+    }
+
+    private func deliver(
+        _ notification: Notification, requiresCurrentTimeline: Bool,
+        action: @escaping (AVPlayerItemNotificationObserverDelegate) -> Void
+    ) {
+        guard let item = notification.object as? AVPlayerItem else { return }
+        let timelineRevision = timelineEvents.current
+        let deliver = { [weak self, weak item] in
+            guard let self = self, let item = item,
+                self.isObserving, self.observingItem === item,
+                !requiresCurrentTimeline || self.timelineEvents.current == timelineRevision,
+                let delegate = self.delegate
+            else { return }
+            action(delegate)
+        }
+        if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
     }
 }

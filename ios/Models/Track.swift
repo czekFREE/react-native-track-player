@@ -50,17 +50,16 @@ class Track: AudioItem, TimePitching, AssetOptionsProviding {
     }
 
     func updateMetadata(dictionary: [String: Any]) {
-        self.title = (dictionary["title"] as? String) ?? self.title
-        self.artist = (dictionary["artist"] as? String) ?? self.artist
-        self.date = dictionary["date"] as? String
-        self.album = dictionary["album"] as? String
-        self.genre = dictionary["genre"] as? String
-        self.desc = dictionary["description"] as? String
-        self.duration = dictionary["duration"] as? Double
-        self.artworkURL = MediaURL(object: dictionary["artwork"])
-        self.isLiveStream = dictionary["isLiveStream"] as? Bool
-
         self.originalObject = self.originalObject.merging(dictionary) { (_, new) in new }
+        self.title = originalObject["title"] as? String
+        self.artist = originalObject["artist"] as? String
+        self.date = originalObject["date"] as? String
+        self.album = originalObject["album"] as? String
+        self.genre = originalObject["genre"] as? String
+        self.desc = originalObject["description"] as? String
+        self.duration = originalObject["duration"] as? Double
+        self.artworkURL = originalObject["artwork"] is NSNull ? nil : MediaURL(object: originalObject["artwork"])
+        self.isLiveStream = originalObject["isLiveStream"] as? Bool
     }
 
     // MARK: - AudioItem Protocol
